@@ -282,17 +282,54 @@ class RangeBreakoutStrategy:
             return False
         return True
 
+    # MetaTrader's order comment is short — 31 characters is the practical
+    # limit, and some brokers reject an over-long one outright rather than
+    # trimming it.
+    COMMENT_LIMIT = 31
+
+    def _order_comment(self) -> str:
+        """`RangeBreak asia #2` — base text, session name, trade number.
+
+        With several sessions running, every position would otherwise read the
+        same word in the terminal. The session tag is the part that identifies
+        the trade, so it is kept whole and the base text is trimmed if
+        something has to give.
+        """
+        n = self.trades_this_session + 1          # this trade, not the last one
+        tag = f"{self.cfg.name or 'MAIN'} #{n}"
+        base = str(self.cfg.comment or "").strip()
+        if not base:
+            return tag[:self.COMMENT_LIMIT]
+        room = self.COMMENT_LIMIT - len(tag) - 1
+        if room <= 0:                              # a long session name wins
+            return tag[:self.COMMENT_LIMIT]
+        return f"{base[:room]} {tag}"
+
     def _open_trade(self, is_buy: bool) -> None:
         b = self.broker
         d = b.digits
         min_dist = b.stops_level_price
 
-        price = b.price_for(is_buy)
-        if price <= 0.0:
+        # TWO price spaces. The signal is computed on the data feed (CME GC);
+        # the order fills on the broker's symbol (spot XAUUSD). They track each
+        # other but quote tens of dollars apart, so the RANGE LEVELS only mean
+        # something in feed space. What crosses between them is the DISTANCE.
+        exec_price = b.price_for(is_buy)              # where the order will fill
+        if exec_price <= 0.0:
             return
+        signal_price = b.reference_price(is_buy)      # where the signal fired
+        if signal_price <= 0.0:
+            signal_price = exec_price
+        translate = bool(getattr(b, "translate_levels", False))
 
-        sl = b.normalize_price(self._stop_price(is_buy))
-        sl_distance = abs(price - sl)
+        stop_level = b.normalize_price(self._stop_price(is_buy))   # feed space
+        sl_distance = abs(signal_price - stop_level)
+        # the level to send with the order: measured from the price we expect
+        # to fill at, so it is already in the broker's space
+        sl = b.normalize_price(
+            (exec_price - sl_distance) if is_buy else (exec_price + sl_distance)
+        ) if translate else stop_level
+        price = exec_price
         if sl_distance <= 0.0:
             self.log.warn("Signal skipped: entry price equals the Stop Loss level "
                           "(zero risk).")
@@ -311,7 +348,8 @@ class RangeBreakoutStrategy:
 
         # send with the SL already attached (protection from tick one);
         # the TP is applied below, from the true execution price.
-        ok, pos, err = b.open_market(is_buy, lot, sl, self.cfg.comment)
+        ok, pos, err = b.open_market(is_buy, lot, sl, self._order_comment(),
+                                     magic=self.cfg.magic)
         if not ok:
             self.log.error(f"{'BUY' if is_buy else 'SELL'} order rejected: {err}")
             return
@@ -330,11 +368,30 @@ class RangeBreakoutStrategy:
             self.range_high, self.range_low, self.range_mid
         pos.trade_no_in_session = self.trades_this_session
 
+        # Re-anchor on the ACTUAL fill. The order filled somewhere the broker
+        # decided — slippage, a moving market, a different instrument — so the
+        # levels are rebuilt from that price, keeping the exact distances the
+        # signal asked for. Risk stays what the strategy intended no matter
+        # where the fill landed.
         entry = pos.entry_price
-        real_sl = b.normalize_price(self._stop_price(is_buy))
-        real_risk = abs(entry - real_sl)
+        if translate:
+            real_risk = sl_distance
+            real_sl = b.normalize_price(
+                (entry - real_risk) if is_buy else (entry + real_risk))
+        else:
+            real_sl = b.normalize_price(self._stop_price(is_buy))
+            real_risk = abs(entry - real_sl)
         real_tp = b.normalize_price(entry + self.cfg.risk_reward * real_risk) if is_buy \
             else b.normalize_price(entry - self.cfg.risk_reward * real_risk)
+        if translate:
+            basis = getattr(b, "basis", None)
+            self.log.info(
+                "Levels carried across instruments | signal {sp} -> fill {e} "
+                "(basis {bs}) | SL distance {rk} | TP distance {rw}".format(
+                    sp=f"{signal_price:.{d}f}", e=f"{entry:.{d}f}",
+                    bs=f"{(basis(is_buy) if callable(basis) else exec_price - signal_price):+.{d}f}",
+                    rk=f"{real_risk:.{d}f}",
+                    rw=f"{self.cfg.risk_reward * real_risk:.{d}f}"))
 
         if min_dist > 0.0 and abs(real_tp - entry) < min_dist:
             self.log.warn(

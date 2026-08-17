@@ -295,6 +295,15 @@ class MT5Config:
     terminal_path: Optional[str] = None
     deviation_points: int = 0             # trade.SetDeviationInPoints(0)
     dry_run: bool = False                 # log orders instead of sending them
+    # The signal is computed on the Databento instrument (CME GC) and executed
+    # on the MT5 symbol (spot XAUUSD). They move together but quote tens of
+    # dollars apart, so a price LEVEL from the feed is meaningless as an order
+    # level on the broker — only the distances transfer.
+    #   true  -> SL/TP are placed as DISTANCES measured from the real fill
+    #            price. Use this whenever the two symbols differ.
+    #   false -> SL/TP are the feed's absolute levels. Correct only when the
+    #            MT5 symbol IS the instrument the bars came from.
+    translate_levels: bool = True
 
 
 # ==========================================================================
@@ -382,6 +391,18 @@ class AppConfig:
                     f"trade can outlive its own window and block the next "
                     f"session. Set close_at_stop_time: true when running more "
                     f"than one session.")
+        seen = {}
+        for s in active:
+            if s.magic in seen:
+                raise ValueError(
+                    f"Sessions '{seen[s.magic]}' and '{s.name}' share magic "
+                    f"{s.magic}. Each session needs its own magic number, or "
+                    f"MetaTrader cannot tell their positions apart. In YAML, "
+                    f"drop the explicit `magic:` from one of them and it is "
+                    f"assigned automatically; when building a config in code, "
+                    f"set a different magic on each session.")
+            seen[s.magic] = s.name
+
         for i, a in enumerate(active):
             for b in active[i + 1:]:
                 if a.overlaps(b):
@@ -562,6 +583,16 @@ class AppConfig:
                     merged["news"] = NewsConfig(**cats)
                 merged.update(sdata)
                 merged["name"] = sdata.get("name") or str(sname)
+                # Every session needs its OWN magic number so MetaTrader can
+                # tell their positions apart — the magic is the only tag that
+                # survives on the broker's side. Inheriting one magic from the
+                # defaults would make all sessions indistinguishable in the
+                # terminal, in the deal history and in any manual clean-up.
+                # A session that names its own magic keeps it; the rest get
+                # base+1, base+2 ... in declaration order, which is stable
+                # across runs so a restart re-attaches to the same positions.
+                if "magic" not in sdata:
+                    merged["magic"] = int(cfg.strategy.magic) + len(cfg.sessions) + 1
                 cfg.sessions[str(sname)] = sub(StrategyConfig, "strategy", merged)
 
         cfg.validate_sessions()

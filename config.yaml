@@ -396,3 +396,14 @@ mt5:
   terminal_path: null             # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
   deviation_points: 0            # max slippage allowed on a market order
   dry_run: false                   # true = log the order, do NOT send it
+
+  # The signal is computed on the Databento instrument (CME GC) and executed on
+  # the MT5 symbol above (spot XAUUSD). The two track each other but quote tens
+  # of dollars apart, so a price LEVEL from the feed means nothing as an order
+  # level on the broker - only the DISTANCES transfer.
+  #   true  -> SL and TP are placed as distances measured from the REAL fill
+  #            price, so risk is exactly what the signal asked for wherever the
+  #            order happened to fill. Use this whenever the two symbols differ.
+  #   false -> SL and TP are the feed's absolute levels. Correct ONLY when the
+  #            MT5 symbol is the very instrument the bars came from.
+  translate_levels: true

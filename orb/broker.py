@@ -106,7 +106,8 @@ class Broker(ABC):
 
     @abstractmethod
     def open_market(self, is_buy: bool, lots: float, sl: float,
-                    comment: str) -> Tuple[bool, Optional[Position], str]: ...
+                    comment: str,
+                    magic: int = 0) -> Tuple[bool, Optional[Position], str]: ...
 
     @abstractmethod
     def modify(self, position: Position, sl: float, tp: float) -> Tuple[bool, str]: ...
@@ -115,7 +116,28 @@ class Broker(ABC):
     def close_all(self, reason: str) -> None: ...
 
     def price_for(self, is_buy: bool) -> float:
+        """Where an order would actually FILL — the execution instrument."""
         return self.ask() if is_buy else self.bid()
+
+    def reference_price(self, is_buy: bool) -> float:
+        """Where the SIGNAL was generated — the data-feed instrument.
+
+        For a backtest, and for live trading on the same instrument the data
+        came from, these are one and the same. They diverge only when the
+        signal is computed on one instrument and executed on another (CME GC
+        deciding, spot XAUUSD executing), which is what `translate_levels`
+        exists for.
+        """
+        return self.price_for(is_buy)
+
+    # A price LEVEL from the feed cannot be sent to a broker quoting a
+    # different instrument: GC and XAUUSD track each other but sit tens of
+    # dollars apart. Only the DISTANCES survive the crossing. When this is
+    # true the strategy carries SL/TP across as distances measured from the
+    # real fill; when false it uses the feed's absolute levels, which is
+    # correct — and exactly what the MQL5 EA does — when both sides are the
+    # same instrument.
+    translate_levels: bool = False
 
     # --- engine hooks ----------------------------------------------------
     # A simulated broker needs to know where price is before the tick runs,
@@ -164,6 +186,10 @@ class SimBroker(Broker):
         self._price = 0.0
         self._now: Optional[datetime] = None
         self.on_exit = None  # callback(ClosedTrade) — used for journal lines
+        # the simulated broker executes the very instrument the bars describe,
+        # so signal space and execution space are identical and levels carry
+        # across unchanged
+        self.translate_levels = False
 
     # -- market context ---------------------------------------------------
     def set_market(self, price: float, now: datetime) -> None:
@@ -187,7 +213,8 @@ class SimBroker(Broker):
     def positions_count(self) -> int:
         return 1 if self.position else 0
 
-    def open_market(self, is_buy: bool, lots: float, sl: float, comment: str):
+    def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
+                    magic: int = 0):
         if self.position is not None:
             return False, None, "position already open"
         price = self.price_for(is_buy)
@@ -198,7 +225,7 @@ class SimBroker(Broker):
         pos = Position(
             ticket=self._next_ticket, is_buy=is_buy, lots=lots,
             entry_price=fill, entry_time=self._now, sl=sl, tp=0.0,
-            comment=comment,
+            comment=comment, magic=int(magic),
             entry_commission=self.commission * lots,
         )
         self._next_ticket += 1
@@ -335,7 +362,7 @@ class MT5Broker(Broker):
     TP applied afterwards from the real fill price via PositionModify.
     """
 
-    def __init__(self, mt5_cfg, spec: SymbolSpec, magic: int, logger=None):
+    def __init__(self, mt5_cfg, spec: SymbolSpec, magic, logger=None):
         try:
             import MetaTrader5 as mt5  # noqa: N813
         except ImportError as exc:  # pragma: no cover
@@ -346,9 +373,22 @@ class MT5Broker(Broker):
         self.mt5 = mt5
         self.cfg = mt5_cfg
         self.spec = spec
-        self.magic = magic
+        # `magic` may be a single number or every session's magic. The EA owns
+        # ALL of them: it must see all its own positions to enforce one trade
+        # at a time, while each order still carries its own session's magic so
+        # MetaTrader can tell them apart.
+        if isinstance(magic, (list, tuple, set, frozenset)):
+            self.magics = {int(m) for m in magic}
+        else:
+            self.magics = {int(magic)}
+        self.magic = min(self.magics)
         self.log = logger
         self.symbol = mt5_cfg.symbol
+        self.translate_levels = bool(getattr(mt5_cfg, "translate_levels", True))
+        # last price seen on the DATA FEED (CME), kept apart from the broker's
+        # own quote so distances can be measured in the space the signal was
+        # computed in
+        self._feed_price: Optional[float] = None
         self._connect()
         self._load_symbol_spec()
 
@@ -392,6 +432,26 @@ class MT5Broker(Broker):
                 f"| stops level {si.trade_stops_level} | vol {si.volume_min}"
                 f"/{si.volume_step}/{si.volume_max}")
 
+    def sync_market(self, bar: Bar, now: datetime) -> None:
+        """The engine hands every feed bar through here. A live broker does not
+        need it to price an order, but it IS how the feed's price reaches the
+        broker — which is what lets SL/TP distances be measured in signal space
+        rather than against the broker's own quote."""
+        self._feed_price = float(bar.close)
+
+    def reference_price(self, is_buy: bool) -> float:
+        """The feed's price, NOT the broker's. Falls back to the broker quote
+        only if no bar has arrived yet."""
+        if self._feed_price and self._feed_price > 0:
+            return self._feed_price
+        return self.price_for(is_buy)
+
+    def basis(self, is_buy: bool) -> float:
+        """Execution price minus feed price — how far the two instruments sit
+        apart right now. Logged on every fill so a drifting basis is visible."""
+        ref = self.reference_price(is_buy)
+        return self.price_for(is_buy) - ref if ref else 0.0
+
     def server_time(self) -> datetime:
         tick = self.mt5.symbol_info_tick(self.symbol)
         return datetime.utcfromtimestamp(tick.time) if tick else datetime.utcnow()
@@ -405,9 +465,16 @@ class MT5Broker(Broker):
         t = self.mt5.symbol_info_tick(self.symbol)
         return t.bid if t else 0.0
 
+    def owns(self, magic) -> bool:
+        """Is this one of ours? Anything else on the account is invisible."""
+        try:
+            return int(magic) in self.magics
+        except (TypeError, ValueError):
+            return False
+
     def _my_positions(self) -> List:
         pos = self.mt5.positions_get(symbol=self.symbol) or []
-        return [p for p in pos if p.magic == self.magic]
+        return [p for p in pos if self.owns(p.magic)]
 
     def positions_count(self) -> int:
         return len(self._my_positions())
@@ -422,8 +489,10 @@ class MT5Broker(Broker):
             return mt5.ORDER_FILLING_IOC
         return mt5.ORDER_FILLING_RETURN
 
-    def open_market(self, is_buy: bool, lots: float, sl: float, comment: str):
+    def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
+                    magic: int = 0):
         mt5 = self.mt5
+        magic = int(magic) if magic else self.magic
         price = self.ask() if is_buy else self.bid()
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -434,8 +503,11 @@ class MT5Broker(Broker):
             "sl": float(sl),
             "tp": 0.0,
             "deviation": int(self.cfg.deviation_points),
-            "magic": int(self.magic),
-            "comment": comment,
+            "magic": magic,
+            # hard cap at the MT5 boundary: the strategy already builds a
+            # comment that fits, but a value set straight on the config must
+            # not be able to get an order rejected for length
+            "comment": str(comment)[:31],
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_mode(),
         }
@@ -508,7 +580,7 @@ class MT5Broker(Broker):
                 "position": p.ticket,
                 "price": price,
                 "deviation": int(self.cfg.deviation_points),
-                "magic": int(self.magic),
+                "magic": int(p.magic),
                 "comment": f"close: {reason}"[:31],
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": self._filling_mode(),

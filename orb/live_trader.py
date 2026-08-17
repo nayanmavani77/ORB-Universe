@@ -35,11 +35,13 @@ class LiveTrader:
             utc_offset_hours=cfg.server_utc_offset_hours,
             timezone_name=cfg.server_timezone)
         # broker / feed are injectable so the live path can be replayed in tests
-        self.broker = broker or MT5Broker(cfg.mt5, cfg.symbol,
-                                          cfg.strategy.magic, self.log)
+        cfg.validate_sessions()
+        # the broker owns every enabled session's magic: it must recognise all
+        # of its own positions, while each order carries its session's own tag
+        magics = {s.magic for s in cfg.enabled_sessions()} or {cfg.strategy.magic}
+        self.broker = broker or MT5Broker(cfg.mt5, cfg.symbol, magics, self.log)
         # one strategy per enabled session, exactly as in the backtest — the
         # single-session case yields one engine and behaves as it always did
-        cfg.validate_sessions()
         self.engine = MultiEngine(cfg.enabled_sessions(), self.broker,
                                   logger=self.log)
         self.engine.after_tick = self._after_tick
@@ -78,15 +80,17 @@ class LiveTrader:
             from .data.dbn import load_dbn_bars
             bars = load_dbn_bars(tmp, self.clock)
             os.unlink(tmp)
-            # replay warm-up bars through the engine's resampler only — no
-            # trading decisions are taken on history
+            # replay warm-up bars into history only — no trading decisions
+            # are taken on past bars (see Engine.warmup_bar)
             for b in bars:
-                closed = self.engine.resampler.push(b)
-                if closed is not None:
-                    self.engine.strategy.ingest_bar(closed)
+                self.engine.warmup_bar(b)
             if bars:
                 self.log.info(f"Warm-up: loaded {len(bars)} historical bars up to "
                               f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
+        except (AttributeError, TypeError, NameError):
+            # a wiring mistake in this module, not a bad network day - never
+            # let it hide behind a warning that reads like a Databento outage
+            raise
         except Exception as exc:
             self.log.warn(f"History warm-up failed ({exc!r}) - the EA will build "
                           f"the range from live bars only.")
@@ -109,8 +113,9 @@ class LiveTrader:
             getattr(mt5, "DEAL_REASON_WEB", 2): "closed manually",
             getattr(mt5, "DEAL_REASON_SO", 6): "STOP OUT",
         }
+        owns = getattr(self.broker, "owns", None)
         for d in deals:
-            if d.magic != self.cfg.strategy.magic:
+            if owns is not None and not owns(d.magic):
                 continue
             if d.symbol != self.cfg.mt5.symbol:
                 continue

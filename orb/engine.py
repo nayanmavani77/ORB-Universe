@@ -72,6 +72,21 @@ class Engine:
         (session rollover, range build, stop time)."""
         self._tick(now, None)
 
+    def warmup_bar(self, bar: Bar) -> Optional[Bar]:
+        """Seed history from a PAST bar without taking any decision.
+
+        Used on live start-up so the current session's range can be rebuilt
+        from downloaded history after a restart. It runs the resampler and
+        files completed bars into the store, but never calls `on_time` or
+        `on_bar_closed` — replaying history through the decision path would
+        fire breakouts that already happened and place orders into today's
+        market at yesterday's signals.
+        """
+        closed = self.resampler.push(bar)
+        if closed is not None:
+            self.strategy.ingest_bar(closed)
+        return closed
+
     # ------------------------------------------------------------------
     def _tick(self, now: datetime, closed_tf: Optional[Bar]) -> None:
         """The EA's OnTick(), in order. This is the single source of truth."""
@@ -160,6 +175,13 @@ class MultiEngine:
     def on_idle(self, now: datetime) -> None:
         for e in self.engines:
             e.on_idle(now)
+
+    def warmup_bar(self, bar: Bar) -> None:
+        """Seed every session's history. Each session has its own resampler and
+        its own timeframe, so one shared warm-up pass would be wrong — the bar
+        has to go through all of them."""
+        for e in self.engines:
+            e.warmup_bar(bar)
 
     def flush(self) -> None:
         for e in self.engines:

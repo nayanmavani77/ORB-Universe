@@ -209,6 +209,11 @@ SPEC: List[Opt] = [
     Opt(("--deviation",), "mt5.deviation_points", "int",
         "Maximum price deviation in points when sending an order.", G_LIVE,
         metavar="POINTS"),
+    Opt(("--translate-levels",), "mt5.translate_levels", "bool",
+        "Carry SL/TP across as DISTANCES from the real fill, for when the data "
+        "feed and the MT5 symbol are different instruments (CME GC signal, "
+        "spot XAUUSD execution). Turn it off only if the MT5 symbol IS the "
+        "instrument the bars came from.", G_LIVE),
     Opt(("--dry-run",), "mt5.dry_run", "bool",
         "Log orders instead of sending them to MT5.", G_LIVE),
 ]

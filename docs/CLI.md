@@ -181,6 +181,7 @@ starts. A run can never quietly use settings you did not intend.
 | `--mt5-server` | — | MT5 broker server name. |
 | `--mt5-path` | — | Path to terminal64.exe, if it is not the default install. |
 | `--deviation` | `0` | Maximum price deviation in points when sending an order. |
+| `--translate-levels` | `true` | Carry SL/TP across as DISTANCES from the real fill, for when the data feed and the MT5 symbol are different instruments (CME GC signal, spot XAUUSD execution). Turn it off only if the MT5 symbol IS the instrument the bars came from. |
 | `--dry-run` | `false` | Log orders instead of sending them to MT5. |
 
 

@@ -46,6 +46,13 @@ print("\n--- A. static: only the engine sequences the tick -------------------")
 
 SEQUENCING_CALLS = ["ingest_bar", "on_time", "on_bar_closed", "resampler.push"]
 
+# the warm-up path must exist and must be the engine's
+src_live = open("orb/live_trader.py", encoding="utf-8").read()
+check("live_trader warms up through the engine",
+      "self.engine.warmup_bar(" in src_live, True)
+check("live_trader does not reach into a resampler",
+      "resampler" in src_live, False)
+
 for runner in ("orb/backtest.py", "orb/live_trader.py"):
     src = open(runner, encoding="utf-8").read()
     # strip comments and docstrings so prose mentioning the names does not count
@@ -54,9 +61,11 @@ for runner in ("orb/backtest.py", "orb/live_trader.py"):
     for call in SEQUENCING_CALLS:
         pattern = re.escape(call) + r"\s*\("
         hits = len(re.findall(pattern, src))
-        # live_trader legitimately replays warm-up history into the resampler
-        allowed = 1 if (runner.endswith("live_trader.py")
-                        and call in ("ingest_bar", "resampler.push")) else 0
+        # No exceptions any more: warm-up used to reach into the resampler
+        # from live_trader, which broke the moment MultiEngine arrived (it has
+        # no .resampler). It now goes through Engine.warmup_bar, so neither
+        # runner touches the sequencing calls at all.
+        allowed = 0
         check(f"{runner} calls {call}() {allowed}x", hits, allowed)
 
 engine_src = open("orb/engine.py", encoding="utf-8").read()

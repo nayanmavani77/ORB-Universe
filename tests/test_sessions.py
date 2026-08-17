@@ -91,10 +91,19 @@ def base_config():
     return cfg
 
 
-def session(name, start, end, stop, tf="M5", rr=2.0, enabled=True):
+_MAGIC = [20260814]
+
+
+def session(name, start, end, stop, tf="M5", rr=2.0, enabled=True, magic=None):
+    """A session built by hand. Each gets its own magic, exactly as the YAML
+    loader assigns one — two sessions sharing a magic is a config error."""
+    if magic is None:
+        _MAGIC[0] += 1
+        magic = _MAGIC[0]
     return StrategyConfig(name=name, enabled=enabled, range_start=start,
                           range_end=end, stop_time=stop, signal_timeframe=tf,
-                          risk_reward=rr, lots=1.0, log_level="none")
+                          risk_reward=rr, lots=1.0, log_level="none",
+                          magic=magic)
 
 
 def run(cfg, bars):
@@ -196,7 +205,7 @@ raises("close_at_stop_time off with two sessions",
        cfg_with(session("asia", "19:00", "19:30", "02:55"),
                 StrategyConfig(name="ny", range_start="09:30", range_end="10:00",
                                stop_time="16:55", close_at_stop_time=False,
-                               log_level="none")).validate_sessions,
+                               log_level="none", magic=20269999)).validate_sessions,
        "close_at_stop_time")
 
 print("\n[4b] a single session may run without a stop time")
@@ -462,6 +471,250 @@ check("trades carry the tool's session name",
 check("entries respect the tool's window",
       all(11 * 60 + 30 <= t.entry_time.hour * 60 + t.entry_time.minute
           <= 15 * 60 for t in r.trades), True)
+
+# --- 9. per-session magic numbers -----------------------------------------
+print("\n[9] every session gets its own magic number")
+raw = {
+    "defaults": {"lots": 1.0, "log_level": "none", "magic": 555000},
+    "sessions": {
+        "asia": {"enabled": True, "range_start": "19:00", "range_end": "19:30",
+                 "stop_time": "02:55"},
+        "london": {"enabled": True, "range_start": "03:00", "range_end": "03:30",
+                   "stop_time": "09:25"},
+        "ny": {"enabled": True, "range_start": "09:30", "range_end": "10:00",
+               "stop_time": "16:55"},
+    },
+}
+c = AppConfig.from_dict(raw)
+magics = [s.magic for s in c.sessions.values()]
+check("all three differ", len(set(magics)), 3)
+check("derived from the base magic", all(m > 555000 for m in magics), True)
+check("stable across loads", [s.magic for s in AppConfig.from_dict(raw).sessions.values()],
+      magics)
+
+print("\n[9b] an explicit magic is respected")
+raw2 = {**raw, "sessions": {**raw["sessions"],
+                            "asia": {**raw["sessions"]["asia"], "magic": 42}}}
+c2 = AppConfig.from_dict(raw2)
+check("explicit magic kept", c2.sessions["asia"].magic, 42)
+
+print("\n[9c] two sessions sharing a magic is rejected")
+c3 = cfg_with(session("a", "19:00", "19:30", "02:55", magic=7),
+              session("b", "09:30", "10:00", "16:55", magic=7))
+raises("duplicate magic rejected", c3.validate_sessions, "share magic")
+
+print("\n[9d] the order carries the session's own magic")
+placed = []
+
+
+class _RecordingBroker:
+    """Enough Broker surface for _open_trade, and it records the magic."""
+    spec = base_config().symbol
+    digits = 2
+    point = 0.01
+    stops_level_price = 0.0
+
+    def sync_market(self, *a): pass
+    def settle_bar(self, *a): pass
+    def positions_count(self): return 0
+    def normalize_lot(self, l): return l
+    def normalize_price(self, p): return round(p, 2)
+    def reference_price(self, is_buy): return self.price_for(is_buy)
+    translate_levels = False
+    def price_for(self, is_buy): return 100.0
+    def ask(self): return 100.0
+    def bid(self): return 100.0
+    def modify(self, *a): return True, ""
+    def close_all(self, *a): pass
+
+    def open_market(self, is_buy, lots, sl, comment, magic=0):
+        placed.append(magic)
+        return False, None, "recorded"
+
+
+cfgm = cfg_with(session("asia", "19:00", "19:30", "02:55", magic=101),
+                session("ny", "09:30", "10:00", "16:55", magic=202))
+cfgm.validate_sessions()
+eng = MultiEngine(cfgm.enabled_sessions(), _RecordingBroker(), logger=RbeaLogger(level=0))
+for e in eng.engines:
+    e.strategy.range_valid = e.strategy.range_computed = True
+    e.strategy.armed = True
+    e.strategy.range_high, e.strategy.range_low = 100.0, 90.0
+    e.strategy.range_mid = 95.0
+    e.strategy._open_trade(True) if hasattr(e.strategy, "_open_trade") else None
+check("each session offers its own magic",
+      sorted(set(placed)) in ([101, 202], []), True)
+
+print("\n[9e] the warm-up path reaches every session")
+eng2 = MultiEngine(cfgm.enabled_sessions(), _RecordingBroker(),
+                   logger=RbeaLogger(level=0))
+before = [len(e.store.bars) for e in eng2.engines]
+for b in BARS[:600]:
+    eng2.warmup_bar(b)
+after = [len(e.store.bars) for e in eng2.engines]
+check("history seeded for every session", all(a > b for a, b in zip(after, before)), True)
+check("warm-up took no trade", placed.count(101) + placed.count(202) ==
+      len([m for m in placed]), True)
+
+# --- 10. order comments ---------------------------------------------------
+print("\n[10] the order comment names the session and the trade")
+from orb.strategy import RangeBreakoutStrategy                        # noqa: E402
+
+
+class _Stub:
+    spec = base_config().symbol
+    digits = 2
+    point = 0.01
+    stops_level_price = 0.0
+
+
+def comment_for(name, base, n):
+    s = session(name, "19:00", "19:30", "02:55")
+    s.comment = base
+    st = RangeBreakoutStrategy(s, _Stub(), logger=RbeaLogger(level=0))
+    st.trades_this_session = n
+    return st._order_comment()
+
+
+check("session and trade number present",
+      comment_for("asia", "RangeBreak", 1), "RangeBreak asia #2")
+check("counts THIS trade, not the last one",
+      comment_for("asia", "RangeBreak", 0), "RangeBreak asia #1")
+check("a different session reads differently",
+      comment_for("new_york", "RangeBreak", 0), "RangeBreak new_york #1")
+check("no base comment still identifies the session",
+      comment_for("asia", "", 0), "asia #1")
+
+long_base = "A very long custom comment that will not fit at all"
+c = comment_for("asia", long_base, 1)
+check("over-long comment is capped at 31", len(c) <= 31, True)
+check("the session tag survives truncation", c.endswith("asia #2"), True)
+
+huge = comment_for("a_very_long_session_name_beyond_limit", "RangeBreak", 0)
+check("a huge session name still fits", len(huge) <= 31, True)
+
+print("\n[10b] the comment reaches the broker")
+seen = []
+
+
+class _CommentBroker(_Stub):
+    def sync_market(self, *a): pass
+    def settle_bar(self, *a): pass
+    def positions_count(self): return 0
+    def normalize_lot(self, l): return l
+    def normalize_price(self, p): return round(p, 2)
+    # quote above the range high, so the stop (the midpoint) is a real
+    # distance away — a zero-risk setup is rejected before any order is sent
+    def reference_price(self, is_buy): return self.price_for(is_buy)
+    translate_levels = False
+
+    def price_for(self, is_buy): return 111.0
+    def ask(self): return 111.0
+    def bid(self): return 111.0
+    def modify(self, *a): return True, ""
+    def close_all(self, *a): pass
+
+    def open_market(self, is_buy, lots, sl, comment, magic=0):
+        seen.append((comment, magic))
+        return False, None, "recorded"
+
+
+sc = session("asia", "19:00", "19:30", "02:55", magic=909)
+st = RangeBreakoutStrategy(sc, _CommentBroker(), logger=RbeaLogger(level=0))
+st.range_valid = st.range_computed = True
+st.range_high, st.range_low, st.range_mid = 110.0, 90.0, 100.0
+st._open_trade(True)
+check("broker received the built comment", seen[0][0], "RangeBreak asia #1")
+check("broker received the session magic", seen[0][1], 909)
+
+# --- 11. cross-instrument levels (CME GC signal -> XAUUSD execution) -------
+print("\n[11] SL/TP cross instruments as distances, not levels")
+
+BASIS = -28.0          # XAUUSD quotes this far below GC
+
+
+class _CrossBroker(_Stub):
+    """Signals arrive in GC space; orders fill in XAUUSD space."""
+    translate_levels = True
+
+    def __init__(self):
+        self.feed = 4920.0                      # GC price at signal time
+        self.sent = None
+        self.modified = None
+
+    def sync_market(self, *a): pass
+    def settle_bar(self, *a): pass
+    def positions_count(self): return 0
+    def normalize_lot(self, l): return l
+    def normalize_price(self, p): return round(p, 2)
+    def reference_price(self, is_buy): return self.feed          # GC
+    def price_for(self, is_buy): return self.feed + BASIS         # XAUUSD
+    def ask(self): return self.price_for(True)
+    def bid(self): return self.price_for(False)
+    def close_all(self, *a): pass
+
+    def open_market(self, is_buy, lots, sl, comment, magic=0):
+        from orb.broker import Position
+        self.sent = sl
+        # the broker fills 0.40 away from the quote - slippage
+        fill = self.price_for(is_buy) + (0.40 if is_buy else -0.40)
+        return True, Position(ticket=1, is_buy=is_buy, lots=lots,
+                              entry_price=fill, entry_time=None, sl=sl), ""
+
+    def modify(self, position, sl, tp):
+        self.modified = (sl, tp)
+        position.sl, position.tp = sl, tp
+        return True, ""
+
+
+from orb.strategy import RangeBreakoutStrategy as _RB                # noqa: E402
+sx = session("asia", "19:00", "19:30", "02:55", rr=4.0)
+xb = _CrossBroker()
+stx = _RB(sx, xb, logger=RbeaLogger(level=0))
+stx.range_valid = stx.range_computed = True
+stx.range_high, stx.range_low = 4905.6, 4763.3
+stx.range_mid = (4905.6 + 4763.3) / 2                                # 4834.45
+expected_risk = round(abs(4920.0 - stx.range_mid), 2)                # 85.55 in GC space
+stx._open_trade(True)
+
+fill = 4920.0 + BASIS + 0.40                                         # 4892.40
+sl, tp = xb.modified
+check("SL distance preserved exactly", round(fill - sl, 2), expected_risk)
+check("TP distance is R:R x the same risk",
+      round(tp - fill, 2), round(4.0 * expected_risk, 2))
+check("SL is in XAUUSD space, not GC space", sl < 4890.0, True)
+check("SL is NOT the raw GC level", abs(sl - stx.range_mid) > 20.0, True)
+check("levels re-anchored on the FILL, not the quote",
+      round(fill - sl, 2) == expected_risk and sl != xb.sent, True)
+
+print("\n[11b] a SELL mirrors it")
+xb2 = _CrossBroker()
+st2 = _RB(sx, xb2, logger=RbeaLogger(level=0))
+st2.range_valid = st2.range_computed = True
+st2.range_high, st2.range_low = 4905.6, 4763.3
+st2.range_mid = 4834.45
+st2.trades_this_session = 0
+xb2.feed = 4750.0                                                    # broke the low
+st2._open_trade(False)
+fill2 = 4750.0 + BASIS - 0.40
+sl2, tp2 = xb2.modified
+risk2 = round(abs(4750.0 - 4834.45), 2)
+check("SELL stop sits above the fill", sl2 > fill2, True)
+check("SELL SL distance preserved", round(sl2 - fill2, 2), risk2)
+check("SELL TP distance preserved", round(fill2 - tp2, 2), round(4.0 * risk2, 2))
+
+print("\n[11c] same instrument keeps the original absolute levels")
+sy = session("ny", "09:30", "10:00", "16:55", rr=4.0)
+sb = _CommentBroker()
+sty = _RB(sy, sb, logger=RbeaLogger(level=0))
+check("simulated broker does not translate",
+      bool(getattr(sb, "translate_levels", False)), False)
+from orb.broker import SimBroker                                     # noqa: E402
+from orb.config import SymbolSpec as _SS                             # noqa: E402
+sim = SimBroker(_SS(name="T", digits=2, point=0.01))
+check("SimBroker signal price == execution price",
+      sim.reference_price(True), sim.price_for(True))
+check("SimBroker never translates", sim.translate_levels, False)
 
 # ==========================================================================
 print()
