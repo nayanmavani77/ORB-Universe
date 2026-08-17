@@ -1,0 +1,12 @@
+# core
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+PyYAML>=6.0
+pyarrow>=12.0        # for merged .parquet bar files (tools/merge_data.py)
+
+# market data
+databento>=0.34
+
+# live execution (Windows only — install separately if you only backtest)
+# MetaTrader5>=5.0.45

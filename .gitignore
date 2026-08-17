@@ -1,0 +1,67 @@
+# ===========================================================================
+#  ORB Universe — files git should not track
+# ===========================================================================
+
+# --- market data -----------------------------------------------------------
+# Databento files and the merged parquet are large (30 MB+) and fully
+# reproducible: download_data.py fetches them, tools/merge_data.py rebuilds
+# the merged file. Keeping them out keeps the repo small and clone-able.
+#   python tools/merge_data.py -d "data/gc_ohlcv1m_parent_*.dbn.zst" \
+#                              -o data/gc_1m_merged.parquet
+data/*.parquet
+data/*.dbn
+data/*.dbn.zst
+data/*.csv
+data/*.pq
+!data/.gitkeep
+
+# --- backtest output -------------------------------------------------------
+# Every run regenerates these. Committing them means a diff on every backtest.
+backtest_out/
+matrix_out/
+matrix_out_*/
+rr_matrix_out/
+rr_matrix_out_*/
+sweeps/
+test_freerun/
+*_trades.csv
+*_equity.csv
+*_stats.csv
+*_pnl.csv
+journal.log
+*.log
+
+# --- local config copies ---------------------------------------------------
+# config.yaml IS tracked (it has no secrets — api_key and MT5 login are null).
+# Keep it that way: put real credentials in environment variables instead.
+#   DATABENTO_API_KEY=...
+# These are personal backups, not shared configuration.
+config.yaml.bak
+config.yaml.bak*
+config.local.yaml
+.env
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- virtual environments --------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
