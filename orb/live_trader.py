@@ -342,9 +342,26 @@ class LiveTrader:
                 continue
             if d.entry != mt5.DEAL_ENTRY_OUT:
                 continue                       # opens are journaled on placement
-            self.strategy.report_exit(d.position_id, reasons.get(d.reason, "closed"),
-                                      d.price, d.profit + d.swap + d.commission,
-                                      self.cfg.symbol.currency)
+            # Report through the strategy that OPENED it, not `self.strategy`
+            # — which is the first session's, and therefore wrong the moment a
+            # run has more than one. `orb/backtest.py` already routes exits by
+            # session name; live has the magic, which names the session
+            # uniquely (`runconfig.merge` refuses a run whose magics collide).
+            self._strategy_for_magic(d.magic).report_exit(
+                d.position_id, reasons.get(d.reason, "closed"),
+                d.price, d.profit + d.swap + d.commission,
+                self.cfg.symbol.currency)
+
+    def _strategy_for_magic(self, magic: int):
+        """The strategy of the session that uses this magic number.
+
+        Falls back to the first session when the magic is unknown, which keeps
+        a single-session run behaving exactly as it always did.
+        """
+        for engine in getattr(self.engine, "engines", [self.engine]):
+            if int(getattr(engine.cfg, "magic", -1)) == int(magic):
+                return engine.strategy
+        return self.strategy
 
     # ------------------------------------------------------------------
     def run(self, poll_seconds: float = 1.0, max_polls: Optional[int] = None,

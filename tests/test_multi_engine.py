@@ -756,3 +756,45 @@ def test_missing_secrets_names_what_is_absent(monkeypatch):
     assert missing_secrets(cfg, live=True) == [
         "DATABENTO_API_KEY", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER"]
     assert missing_secrets(cfg, live=False) == ["DATABENTO_API_KEY"]
+
+
+def test_live_exits_are_routed_to_the_session_that_opened_them():
+    """A closing trade must be journalled by the strategy that opened it.
+
+    `orb/backtest.py` has always routed exits by session name. The live path
+    used `LiveTrader.strategy`, which is the FIRST session's — so an
+    `orb_reverse` exit was reported by the `orb` strategy. Harmless while
+    `report_exit` is pure journalling with a shared logger, but wrong, and a
+    trap the moment it gains any state or per-session output. Live routes on
+    the magic, which names a session uniquely (`runconfig.merge` refuses a run
+    whose magics collide).
+    """
+    from orb.broker import SimBroker
+    from orb.engines.orb.strategy import OrbStrategy
+    from orb.engines.orb_reverse.strategy import OrbReverseStrategy
+    from orb.live_trader import LiveTrader
+    from orb.logger import RbeaLogger
+    from orb.runconfig import RunConfig, merge
+
+    class Feed:
+        def start(self): pass
+        def stop(self): pass
+        def poll(self, timeout=1.0): return None
+
+    cfg = merge(RunConfig.load_many(["orb", "orb_reverse"]))
+    for s in cfg.sessions.values():
+        s.enabled = True
+    trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
+                        feed=Feed(), logger=RbeaLogger(level=0))
+
+    by_magic = {s.magic: s for s in cfg.enabled_sessions()}
+    assert len(by_magic) > 1, "this test needs a mixed run"
+    expected = {"orb": OrbStrategy, "orb_reverse": OrbReverseStrategy}
+    for magic, session in by_magic.items():
+        got = trader._strategy_for_magic(magic)
+        assert isinstance(got, expected[session.engine]), (
+            f"magic {magic} ({session.name}, {session.engine}) routed to "
+            f"{type(got).__name__}")
+
+    # an unknown magic must not raise — it falls back, as it always did
+    assert trader._strategy_for_magic(-1) is trader.strategy

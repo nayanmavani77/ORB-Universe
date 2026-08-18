@@ -501,11 +501,29 @@ class MT5Broker(Broker):
             if deals is None:
                 return None
             entry_in = getattr(self.mt5, "DEAL_ENTRY_IN", 0)
-            return sum(
-                1 for d in deals
-                if int(getattr(d, "magic", -1)) == int(magic)
-                and int(getattr(d, "entry", entry_in)) == int(entry_in)
-                and str(getattr(d, "symbol", "")) == str(self.symbol))
+            buy = getattr(self.mt5, "DEAL_TYPE_BUY", 0)
+            sell = getattr(self.mt5, "DEAL_TYPE_SELL", 1)
+            n = 0
+            for d in deals:
+                # STRICT on every field. An earlier version defaulted a missing
+                # `entry` to "this is an opening", which counts anything the
+                # client hands back that lacks the attribute. Over-counting is
+                # the dangerous direction here: the caller takes the LARGER of
+                # this and the history replay, so an over-count silently
+                # blocks a session that still had allowance, while an
+                # under-count is covered by the replay.
+                if not hasattr(d, "entry") or not hasattr(d, "magic"):
+                    continue
+                if int(d.magic) != int(magic):
+                    continue
+                if str(getattr(d, "symbol", "")) != str(self.symbol):
+                    continue
+                if int(d.entry) != int(entry_in):
+                    continue                      # a close, or a reversal leg
+                if int(getattr(d, "type", buy)) not in (int(buy), int(sell)):
+                    continue                      # balance, credit, commission
+                n += 1
+            return n
         except Exception as exc:
             if self.log:
                 self.log.warn(f"Could not read MT5 trade history ({exc!r}).")

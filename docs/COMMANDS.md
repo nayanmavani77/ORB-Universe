@@ -154,6 +154,13 @@ Check the connection first:
 python tools\mt5_check.py
 ```
 
+To check a `N opened on the account` figure from the journal against your
+terminal — it prints the actual deals behind the count, per session:
+
+```powershell
+python tools\mt5_check.py --deals
+```
+
 ---
 
 ## 7. Checks

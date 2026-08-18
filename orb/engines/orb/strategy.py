@@ -260,6 +260,7 @@ class OrbStrategy:
         unknown allowance cannot be spent safely.
         """
         d = self.broker.digits
+        who = f"[{(self.cfg.name or 'MAIN')} / magic {self.cfg.magic}]"
         self.armed = False
         self._await_reentry = True
 
@@ -272,7 +273,7 @@ class OrbStrategy:
         if replayed is None and actual is None:
             self._session_blocked = True
             self.log.warn(
-                f"Late start and this session's history could not be read, so "
+                f"{who} Late start, and this session's history could not be read, so "
                 f"how much of the {self.cfg.max_trades_per_session}-trade "
                 f"allowance is already spent is unknown. NO trades this "
                 f"session. The next session starts clean.")
@@ -285,20 +286,21 @@ class OrbStrategy:
         if replayed is not None:
             source.append(f"{replayed} from replaying its history")
         if actual is not None:
-            source.append(f"{actual} opened on the account")
+            source.append(f"{actual} opened on the account under magic "
+                          f"{self.cfg.magic}")
 
         if 0 < cap <= used:
             self._session_blocked = True
             self.log.warn(
-                f"Late start — NO trades this session. It had already used all "
-                f"{cap} of its trades before the EA started at "
+                f"{who} Late start — NO trades this session. It had already "
+                f"used all {cap} of its trades before the EA started at "
                 f"{fmt_dt(self.started_at)} ({', '.join(source)}). The range "
                 f"below is still built and journalled.")
             return
 
         left = "unlimited" if cap <= 0 else str(cap - used)
         self.log.warn(
-            f"Late start: this session's range window closed at "
+            f"{who} Late start: this session's range window closed at "
             f"{fmt_time(self.session_end)}, before the EA started at "
             f"{fmt_dt(self.started_at)}, so its early breakouts happened "
             f"unseen ({', '.join(source)}). {left} trade(s) of "

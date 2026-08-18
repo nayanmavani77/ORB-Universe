@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -321,6 +321,64 @@ def place_round_trip(mt5, cfg, si, tick, request, force):
 
 
 # --------------------------------------------------------------------------
+def show_deals(cfg) -> int:
+    """Print what each session's magic actually opened, per session window.
+
+    This is the same query `OrbStrategy._adopt_late_session` makes, so a figure
+    in the journal can be checked against the terminal rather than trusted. The
+    journal prints the count; this prints the deals behind it.
+    """
+    try:
+        import MetaTrader5 as mt5      # noqa: N813
+    except ImportError:
+        print("MetaTrader5 is not installed — this needs Windows and a running "
+              "terminal.", file=sys.stderr)
+        return 2
+
+    from orb.broker import MT5Broker
+    magics = {s.magic for s in cfg.enabled_sessions()} or {cfg.strategy.magic}
+    broker = MT5Broker(cfg.mt5, cfg.symbol, magics)
+    now = broker.server_time()
+
+    print("=" * 74)
+    print(f"  Trades opened per session — {cfg.mt5.symbol} — server time "
+          f"{now:%Y-%m-%d %H:%M}")
+    print("=" * 74)
+    for s in cfg.enabled_sessions():
+        # the current instance of this session's window, in server time
+        hh, mm = (int(x) for x in str(s.range_start).split(":"))
+        since = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if since > now:
+            since -= timedelta(days=1)
+        n = broker.trades_opened_since(s.magic, since)
+        cap = s.max_trades_per_session or 0
+        verdict = ("could not read" if n is None else
+                   f"{n} of {cap or 'unlimited'}"
+                   + ("  ** AT OR OVER THE CAP **" if cap and n >= cap else ""))
+        print(f"\n  {(s.name or 'MAIN'):<12} [{s.engine:<12}] magic {s.magic} "
+              f"| window opened {since:%Y-%m-%d %H:%M}")
+        print(f"      counted: {verdict}")
+        deals = mt5.history_deals_get(since, now + timedelta(days=1)) or []
+        rows = [d for d in deals
+                if getattr(d, "magic", None) == s.magic
+                and getattr(d, "symbol", "") == cfg.mt5.symbol]
+        if not rows:
+            print("      no deals")
+            continue
+        for d in sorted(rows, key=lambda x: x.time):
+            when = datetime.fromtimestamp(d.time, tz=timezone.utc).replace(
+                tzinfo=None)
+            kind = "OPEN " if d.entry == mt5.DEAL_ENTRY_IN else "close"
+            side = {0: "BUY ", 1: "SELL"}.get(d.type, f"t{d.type}")
+            print(f"      {when:%Y-%m-%d %H:%M}  {kind} {side} "
+                  f"{d.volume:>5.2f} @ {d.price:<10.3f} "
+                  f"profit {d.profit:>9.2f}  #{d.position_id}")
+    print("\n" + "=" * 74)
+    print("  Only lines marked OPEN are counted. A 'close' is the same trade "
+          "leaving.")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Check the MetaTrader 5 connection the EA will use",
@@ -340,6 +398,11 @@ examples:
                    help="actually send a test order and close it (demo only)")
     p.add_argument("--force", action="store_true",
                    help="allow --place-trade on a LIVE account")
+    p.add_argument("--deals", action="store_true",
+                   help="list the trades each session's magic has opened "
+                        "today, exactly as the EA counts them, and stop. Use "
+                        "this to check a 'N opened on the account' figure in "
+                        "the journal against your MT5 History tab.")
     a = p.parse_args()
 
     try:
@@ -363,6 +426,9 @@ examples:
               f"happens to be open and pass, while run_live.py could not log "
               f"in at all.", file=sys.stderr)
         return 2
+
+    if a.deals:
+        return show_deals(cfg)
 
     print("=" * 60)
     print("  MetaTrader 5 connection check")
