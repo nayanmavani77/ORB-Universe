@@ -405,7 +405,7 @@ mt5:
   # in git — anything written here is committed and pushed.
 
   deviation_points: 20            # max slippage allowed on a market order
-  dry_run: true                   # true = log the order, do NOT send it
+  dry_run: false                   # true = log the order, do NOT send it
 
   # The signal is computed on the Databento instrument (CME GC) and executed on
   # the MT5 symbol above (spot XAUUSD). The two track each other but quote tens
