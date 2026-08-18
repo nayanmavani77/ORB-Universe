@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Does taking the OPPOSITE side of a losing configuration make money?
 
-    python tools/reversal_test.py --worst 10 --rr 1,1.5,2,2.5 \
-        --data data/gc_1m_merged.parquet --out reversal_out
+    python tools/reverse_study.py --worst 10 --rr 1,1.5,2,2.5 \
+        --data data/gc_1m_merged.parquet --out backtest/orb_reverse/study
 
 Variants tested for each configuration:
 
@@ -102,7 +102,7 @@ def main() -> int:
         description="Reverse the first N trades of a session and compare")
     p.add_argument("--config", "-c", default=ENGINE_CONFIG)
     p.add_argument("--data", "-d", nargs="+", default=None)
-    p.add_argument("--summary", default="rr_matrix_out/_summary/all_results.csv",
+    p.add_argument("--summary", default=os.path.join("backtest", "orb", "matrix", "_summary", "all_results.csv"),
                    help="matrix summary used to pick the worst configurations")
     p.add_argument("--worst", type=int, default=10,
                    help="how many of the worst configurations to test")
@@ -115,7 +115,7 @@ def main() -> int:
                         "LONDON. Ignores --worst and --rr.")
     p.add_argument("--start", default="2026-01-01")
     p.add_argument("--end", default="2026-08-13")
-    p.add_argument("--out", default="reversal_out")
+    p.add_argument("--out", default=os.path.join("backtest", "orb_reverse", "study"))
     a = p.parse_args()
 
     base = AppConfig.load(a.config)

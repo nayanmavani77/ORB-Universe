@@ -1,4 +1,4 @@
-"""Sweep axes for the breakout engine.
+"""Sweep axes for the `orb` engine.
 
 The same grid `tools/run_matrix.py` has always swept, expressed once so a sweep
 tool can ask the engine what its axes are instead of hard-coding them.

@@ -3,7 +3,7 @@
 
 The question this answers
 -------------------------
-The London reversal study picked the 10 configurations that lost the most on
+The London reverse study (tools/reverse_study.py) picked the 10 configurations that lost the most on
 2026 data and then reversed them ON THAT SAME 2026 DATA. That is profitable by
 arithmetic, not by edge -- it would come out profitable on random noise too.
 
@@ -23,13 +23,13 @@ a real procedure. If it is not, the in-sample profit was the selection talking.
 Two phases
 ----------
     python tools/walk_forward.py collect --data data/gc_1m_merged.parquet \
-        --start 2023-01-01 --end 2026-08-13 --out walk_forward_out
+        --start 2023-01-01 --end 2026-08-13 --out backtest/orb_reverse/walk_forward
 
         Runs every LONDON configuration in all four variants across the whole
         history ONCE and stores the individual trades. This is the expensive
         part (a few CPU-hours); it is done once and reused.
 
-    python tools/walk_forward.py analyze --out walk_forward_out
+    python tools/walk_forward.py analyze --out backtest/orb_reverse/walk_forward
 
         Replays the walk-forward selection over those stored trades for a grid
         of fit lengths and selection sizes. Seconds, not hours.
@@ -363,12 +363,12 @@ def main() -> int:
     c.add_argument("--session", default="LONDON")
     c.add_argument("--start", default="2023-01-01")
     c.add_argument("--end", default="2026-08-13")
-    c.add_argument("--out", default="walk_forward_out")
+    c.add_argument("--out", default=os.path.join("backtest", "orb_reverse", "walk_forward"))
     c.add_argument("--jobs", "-j", type=int, default=max(1, (os.cpu_count() or 2)))
     c.add_argument("--limit", type=int, default=0, help="first N configs only")
 
     n = sub.add_parser("analyze", help="replay the walk-forward (fast)")
-    n.add_argument("--out", default="walk_forward_out")
+    n.add_argument("--out", default=os.path.join("backtest", "orb_reverse", "walk_forward"))
     n.add_argument("--fit", default="1,2,3,6",
                    help="fit window lengths in months")
     n.add_argument("--k", default="1,3,5,10",

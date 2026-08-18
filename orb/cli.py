@@ -382,7 +382,12 @@ def _fan_out_to_sessions(cfg: AppConfig, touched) -> None:
         if session is cfg.strategy:
             continue
         for field_name in touched:
-            setattr(session, field_name, getattr(cfg.strategy, field_name))
+            # A path, not a bare name: the per-category news flags are
+            # `strategy.news.<category>.dates` / `.mode`, so what lands in
+            # `touched` is `news.<category>.dates`. A plain setattr on that
+            # raised AttributeError and took every `--<cat>-dates` flag with it
+            # on any config that has a sessions block — which is both of them.
+            set_path(session, field_name, get_path(cfg.strategy, field_name))
 
 
 def _select_sessions(cfg: AppConfig, wanted: Optional[str]) -> None:

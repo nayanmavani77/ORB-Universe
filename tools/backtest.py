@@ -22,7 +22,8 @@ value without editing anything:
     python tools/backtest.py --engine orb_reverse --set direction=forward
     python tools/backtest.py --engine orb --session LONDON --rr 3
 
-Results go to `backtest/<engine>/<run-name>/`.
+Results go to `backtest/<engine>/<run-name>/`, or
+`backtest/mixed/<engine>_<engine>/` when several engines are merged.
 
 One tool for every engine. Adding an engine does not mean writing another
 script; it means dropping a `config.yaml` next to the strategy.
@@ -115,8 +116,58 @@ def _execute(app, name, out, start, end, level, header) -> int:
     return 0
 
 
+#: Flags `_run_merged` understands. Everything else in the "run overrides" and
+#: "engine option overrides" groups is per-ENGINE, and a merged run has more
+#: than one engine — so there is no honest answer to "which engine does
+#: `--rr 3` apply to?". Rather than pick one silently, a merged run rejects
+#: them and says so. (`--out` is handled separately; it names the output
+#: folder, which a merged run does have exactly one of.)
+MERGED_OK = ("start", "end", "data", "log_level", "out")
+
+#: Human-facing flag names, for the error message above. Keyed by the argparse
+#: destination so the two lists can never drift apart.
+FLAG_NAMES = {
+    "session": "--session", "signal_timeframe": "--tf", "orb_minutes": "--orb",
+    "risk_reward": "--rr", "lots": "--lots", "news": "--news",
+    "max_trades_per_session": "--max-trades",
+    "options": "--set", "sl_mult": "--sl-mult",
+    "forward": "--forward", "reverse": "--reverse",
+}
+
+
+def _reject_per_engine_flags(a, engines) -> list:
+    """Which per-engine flags did the user pass to a merged run?
+
+    Returns the flag names, so the caller can refuse with a message naming
+    them. A merged run that quietly ignored `--rr 3` would report results the
+    user did not ask for, which is worse than not running at all.
+    """
+    used = []
+    for dest, flag in FLAG_NAMES.items():
+        if dest in MERGED_OK:
+            continue
+        value = getattr(a, dest, None)
+        if value:                      # [] and False and None all mean "not set"
+            used.append(flag)
+    return sorted(used)
+
+
 def _run_merged(a, engines) -> int:
-    """Several engines, one account, one pass over the bars."""
+    """Several engines, one account, one pass over the bars.
+
+    Each session keeps the engine of the config file it is written in, so the
+    per-engine override flags have no single meaning here — see MERGED_OK.
+    """
+    blocked = _reject_per_engine_flags(a, engines)
+    if blocked:
+        verb = "applies" if len(blocked) == 1 else "apply"
+        print(f"{', '.join(blocked)} {verb} to ONE engine, but this run merges "
+              f"{len(engines)} ({', '.join(engines)}).\n"
+              f"Set the value in that engine's config.yaml instead, or run the "
+              f"engine on its own:\n"
+              f"    python tools/backtest.py --engine {engines[0]} ...",
+              file=sys.stderr)
+        return 2
     configs = RunConfig.load_many(engines)
     app = merge(configs)                     # raises on a shared-block mismatch
     start, end = merged_dates(configs)
@@ -170,6 +221,10 @@ def main() -> int:
     g.add_argument("--orb", dest="orb_minutes", type=int, default=None)
     g.add_argument("--rr", dest="risk_reward", type=float, default=None)
     g.add_argument("--lots", type=float, default=None)
+    g.add_argument("--max-trades", dest="max_trades_per_session", type=int,
+                   default=None, metavar="N",
+                   help="cap trades per session for this run; 0 = unlimited. "
+                        "A session field, so it does NOT go through --set.")
     g.add_argument("--news", default=None, choices=["skip", "include"])
     g.add_argument("--start", default=None)
     g.add_argument("--end", default=None)
@@ -211,7 +266,7 @@ def main() -> int:
 
     run_over = {k: getattr(a, k) for k in
                 ("session", "signal_timeframe", "orb_minutes", "risk_reward",
-                 "lots", "news", "log_level")}
+                 "lots", "news", "log_level", "max_trades_per_session")}
     if a.start:
         rc.period["start"] = a.start
     if a.end:
@@ -234,7 +289,14 @@ def main() -> int:
     if engine_opts:
         run_over["engine_options"] = engine_opts
 
-    app = rc.app_config(run_over)
+    # An unknown engine option raises out of EngineSettings.from_options with a
+    # message that already names the valid keys. Print that, rather than a
+    # stack trace — a typo in `--set` is a user error, not a crash.
+    try:
+        app = rc.app_config(run_over)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     name = rc.run_name(run_over)
     start, end = rc.dates()
     out = resolve_out(app, name, out_dir=a.out or rc.out_dir())

@@ -105,10 +105,16 @@ class StrategyConfig:
     #
     #   sessions:
     #     london:
-    #       engine: reversal
+    #       engine: orb_reverse
     #       engine_options:
     #         sl_range_mult: 0.75
     #         direction: reverse
+    #
+    # The engine name is the folder name under `orb/engines/` — `orb` or
+    # `orb_reverse` today. A field declared HERE is a session setting and must
+    # stay out of `engine_options`; `EngineSettings.from_options` rejects the
+    # mix-up rather than letting two copies of e.g. `max_trades_per_session`
+    # disagree.
     engine: str = "orb"
     engine_options: Dict[str, Any] = field(default_factory=dict)
 
@@ -312,7 +318,10 @@ class BacktestConfig:
     commission_per_lot_per_side: float = 0.0
     # if both SL and TP are touched inside the same bar, assume the worse one
     pessimistic_intrabar: bool = True
-    out_dir: str = "backtest_out"
+    #: Where a run writes. `null`/None means "let orb/outputs.py decide", which
+    #: is `backtest/<engine>/<run-name>/`. A literal path here still wins, so
+    #: `--out somewhere` and any existing habit keep working unchanged.
+    out_dir: Optional[str] = None
     report_name: str = "orb_backtest_report"
 
 
@@ -458,6 +467,11 @@ class AppConfig:
             raw = yaml.safe_load(text) or {}
         else:
             raw = json.loads(text)
+        # Only file loads are checked. `from_dict` is also fed configs that were
+        # round-tripped through `to_dict()`, where the credential fields ARE
+        # populated (from the environment) and rejecting them would refuse a
+        # config this loader itself produced.
+        reject_config_secrets(raw, os.path.basename(path))
         return AppConfig.from_dict(raw)
 
     @staticmethod
@@ -700,7 +714,17 @@ def journal_settings(cfg):
 #: the file credentials live in — project root, never committed
 ENV_FILE = ".env"
 
-_DOTENV_LOADED = False
+#: Credential fields, keyed by the dotted config path they would occupy, mapped
+#: to the environment variable that is the ONLY legitimate source. Used both to
+#: fill them (`apply_secrets`) and to reject them if a tracked config file tries
+#: to supply one (`reject_config_secrets`).
+SECRET_FIELDS = {
+    "databento.api_key": "DATABENTO_API_KEY",
+    "mt5.login": "MT5_LOGIN",
+    "mt5.password": "MT5_PASSWORD",
+    "mt5.server": "MT5_SERVER",
+    "mt5.terminal_path": "MT5_TERMINAL_PATH",
+}
 
 
 def find_dotenv(start: Optional[str] = None) -> Optional[str]:
@@ -732,10 +756,8 @@ def load_dotenv(path: Optional[str] = None, override: bool = False) -> Dict[str,
     Deliberately dependency-free — this is a dozen lines of parsing, and adding
     `python-dotenv` for it would be a new install step for every user.
     """
-    global _DOTENV_LOADED
     path = path or find_dotenv()
     if not path or not os.path.isfile(path):
-        _DOTENV_LOADED = True
         return {}
     applied: Dict[str, str] = {}
     with open(path, encoding="utf-8") as fh:
@@ -759,7 +781,6 @@ def load_dotenv(path: Optional[str] = None, override: bool = False) -> Dict[str,
             if override or not os.environ.get(key):
                 os.environ[key] = value
                 applied[key] = value
-    _DOTENV_LOADED = True
     return applied
 
 
@@ -769,7 +790,12 @@ def apply_secrets(cfg: "AppConfig") -> "AppConfig":
     Secrets are NOT in the config files: every engine config is a tracked source
     file, so a password written into one is committed and pushed. The config
     dataclasses still have the fields — the live broker and the data client need
-    somewhere to read them from — they are just never populated from YAML.
+    somewhere to read them from — but the only thing that ever writes them is
+    this function, from the environment.
+
+    `reject_config_secrets` below enforces the other half: a config that tries
+    to supply one is refused at load, rather than quietly honoured. Precedence
+    inside the environment is unchanged — a real variable beats `.env`.
     """
     load_dotenv()
     if not cfg.databento.api_key:
@@ -790,6 +816,34 @@ def apply_secrets(cfg: "AppConfig") -> "AppConfig":
     if not cfg.mt5.terminal_path:
         cfg.mt5.terminal_path = os.environ.get("MT5_TERMINAL_PATH")
     return cfg
+
+
+def reject_config_secrets(data: Dict[str, Any], source: str = "") -> None:
+    """Refuse a config that carries a credential.
+
+    Without this, `databento.api_key: "db-..."` in an engine config loads and
+    works — and is then committed and pushed, which is exactly what moving the
+    credentials to `.env` was meant to prevent. Empty values are allowed, so an
+    old config with blank placeholders still loads.
+    """
+    found = []
+    for path, env_name in SECRET_FIELDS.items():
+        block, _, field_name = path.partition(".")
+        section = data.get(block)
+        if not isinstance(section, dict):
+            continue
+        value = section.get(field_name)
+        if value in (None, "", 0):
+            continue
+        found.append(f"{path} -> {env_name}")
+    if found:
+        where = f" in {source}" if source else ""
+        raise ValueError(
+            "Credentials must not be in a config file{}, because config files "
+            "are tracked in git.\n  ".format(where) + "\n  ".join(found) +
+            f"\nMove the value(s) into {ENV_FILE} at the project root under "
+            f"the environment name shown, and delete the config field. "
+            f"See .env.example.")
 
 
 def missing_secrets(cfg: "AppConfig", live: bool = True) -> List[str]:

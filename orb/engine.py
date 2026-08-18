@@ -219,8 +219,8 @@ class MultiEngine:
         A closing trade must be journalled by the strategy that opened it. With
         one engine, "the first session's strategy" happened to be right often
         enough not to matter; with several engines running different strategies
-        it is simply wrong — a reversal exit would be reported by the breakout
-        strategy. `ClosedTrade.session_name` carries the answer, so use it.
+        it is simply wrong — an `orb_reverse` exit would be reported by the
+        `orb` strategy. `ClosedTrade.session_name` carries the answer, so use it.
 
         Falls back to the first session when the name is unknown, which keeps
         the single-session path behaving exactly as it always did.

@@ -19,13 +19,19 @@ sessions:
     range_start: "03:00"
     range_end:   "03:15"
     stop_time:   "09:30"
+    max_trades_per_session: 3     # a SESSION field, one level up
     engine_options:
       sl_range_mult: 0.75
       direction: reverse
-      max_trades_per_session: 3
 ```
 
-Everything except the stop and the direction is inherited from the breakout
+`max_trades_per_session` sits on the **session**, not under `engine_options`.
+It is a core field the session itself enforces, so putting it below raises at
+load: *"['max_trades_per_session'] are session settings, not engine options."*
+The rule exists because the field once lived in both places and only one of
+them was enforced — a config asking for 3 trades took 6.
+
+Everything except the stop and the direction is inherited from the `orb`
 engine and runs unmodified — the range build, the breakout test, the arming and
 re-entry rules, the news filter, the stop time, the fill model. The class
 overrides exactly two methods: `_stop_price` and `_open_trade`.
@@ -37,10 +43,13 @@ overrides exactly two methods: `_stop_price` and `_open_trade`.
 | `sl_range_mult` | `0.5` | stop distance as a multiple of the opening range |
 | `direction` | `reverse` | `reverse` fades the breakout, `forward` follows it |
 | `sl_anchor` | `range` | how a reversed stop distance is measured — `range` or `mirror` |
-| `max_trades_per_session` | `0` | 1 = R, 2 = RR, 3 = RRR, 0 = unlimited |
 | `order_tag` | `REV` | prefix in the MT5 order comment |
 
-Old spellings still load: `max_trades`, `mult`, `anchor`, `tag`.
+Old spellings still load: `mult`, `anchor`, `tag`. (`max_trades` does not —
+it was a session field all along; see the note above.)
+
+`max_trades_per_session` is a **session** setting, not an engine option:
+`1 = R, 2 = RR, 3 = RRR, 0 = unlimited`.
 
 ### `sl_range_mult` — the axis the original matrix never searched
 
@@ -72,8 +81,8 @@ side of the entry.
 - **`range`** (default) — `risk = sl_range_mult × range height`, measured from
   the fill. Independent of how far the breakout bar overshot.
 - **`mirror`** — the exact distance the original trade would have taken,
-  overshoot included, mirrored. Reproduces the earlier `tools/reversal_test.py`
-  study, so old numbers can be re-derived.
+  overshoot included, mirrored. Reproduces the earlier study now in
+  `tools/reverse_study.py`, so old numbers can be re-derived.
 
 ## How the stop is placed
 
@@ -106,7 +115,7 @@ Take profit is unchanged: `risk_reward × risk`, anchored on the actual fill.
 
 ## A note on how this used to work
 
-The engine was reached by rebinding `orb.engine.OrbStrategy` — a
+The engine was reached by rebinding `orb.engine.RangeBreakoutStrategy` (the class's name at the time) — a
 process-wide monkey-patch. That made it impossible to run this engine and the
 breakout engine at the same time, and it gave the reversal no live path at all,
 because `LiveTrader` never applied the patch. Selection now happens per session

@@ -5,7 +5,7 @@ the same structure, and engines run together in backtest and live without
 interfering.
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia running
-the breakout engine and London running the reversal engine, in ONE backtest,
+the `orb` engine and London running the `orb_reverse` engine, in ONE backtest,
 must produce exactly the trades each produces on its own. That is the whole
 claim, and before the registry existed it was impossible — a second engine could
 only be reached by rebinding a module global, which applied to every session at

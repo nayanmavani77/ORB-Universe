@@ -1,14 +1,15 @@
-"""Options for the reversal engine.
+"""Options for the `orb_reverse` engine.
 
 These arrive in a session's `engine_options` dict:
 
     sessions:
       london:
-        engine: reversal
+        engine: orb_reverse
+        max_trades_per_session: 3     # a SESSION field — NOT an engine option;
+                                      # putting it below raises at load
         engine_options:
           sl_range_mult: 0.75
           direction: reverse
-          max_trades_per_session: 3
 
 Previously they were stamped onto `StrategyConfig` as undeclared `rev_*`
 attributes. That had two silent failures: `asdict()` cannot see a non-field
@@ -38,7 +39,7 @@ class OrbReverseSettings(EngineSettings):
 
     sl_range_mult
         Stop distance as a multiple of the opening range height. 0.5 reproduces
-        the breakout engine's `mid_range` and 1.0 its `full_range`, exactly —
+        the `orb` engine's `mid_range` and 1.0 its `full_range`, exactly —
         trade for trade. Any positive value is allowed: 0.25, 0.75, 1.5, 2.0.
 
     direction
@@ -89,7 +90,7 @@ class OrbReverseSettings(EngineSettings):
                 self.sl_range_mult <= 0:
             raise ValueError(
                 f"sl_range_mult must be greater than 0 (got "
-                f"{self.sl_range_mult!r}). 0.5 = the breakout engine's "
+                f"{self.sl_range_mult!r}). 0.5 = the `orb` engine's "
                 f"mid_range, 1.0 = its full_range.")
         self.sl_range_mult = float(self.sl_range_mult)
 
@@ -122,7 +123,7 @@ class OrbReverseSettings(EngineSettings):
         return f"{head}_SL{mult}_{cap}"
 
     def describe(self) -> str:
-        note = {0.5: "  (identical to the breakout engine's mid_range)",
+        note = {0.5: "  (identical to the `orb` engine's mid_range)",
                 1.0: "  (identical to its full_range)"}.get(
                     float(self.sl_range_mult), "")
         base = ("fade the breakout" if self.reverse

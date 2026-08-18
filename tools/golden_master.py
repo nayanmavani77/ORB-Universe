@@ -48,8 +48,13 @@ ENGINE_CONFIG = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "orb", "engines", "orb", "config.yaml")
 
-DEFAULT_DIR = "golden_master"
-DATA = "data/gc_1m_merged.parquet"
+#: Anchored to the repo like ENGINE_CONFIG above, not to the working directory.
+#: The point of this tool is that two runs on different days compare equal, so
+#: it must read the same data and write the same folder wherever it is invoked
+#: from — a relative path here made `check` fail from any other directory.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DIR = os.path.join(REPO, "golden_master")
+DATA = os.path.join(REPO, "data", "gc_1m_merged.parquet")
 START, END = "2026-01-01", "2026-08-13"
 
 # the fields that describe what the strategy DID — everything else is cosmetic

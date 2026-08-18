@@ -350,6 +350,20 @@ examples:
     if a.symbol:
         cfg.mt5.symbol = a.symbol
 
+    # Without credentials, `MT5Broker.connect` attaches to whatever terminal is
+    # already open and logged in — so every check below would pass while
+    # `run_live.py` could not log in at all. Refuse instead of reporting a
+    # connection the EA cannot make on its own.
+    missing = missing_secrets(cfg, live=True)
+    if missing:
+        print(f"Missing credential(s): {', '.join(missing)}\n"
+              f"They belong in {ENV_FILE} at the project root — copy "
+              f".env.example to {ENV_FILE} and fill it in.\n"
+              f"Without them this check would attach to whatever terminal "
+              f"happens to be open and pass, while run_live.py could not log "
+              f"in at all.", file=sys.stderr)
+        return 2
+
     print("=" * 60)
     print("  MetaTrader 5 connection check")
     print("=" * 60)

@@ -1,12 +1,39 @@
-# core
+# ===========================================================================
+#  pip install -r requirements.txt
+#
+#  Credentials are NOT installed by this file. Copy `.env.example` to `.env`
+#  and fill it in — see docs/COMMANDS.md section 6.
+# ===========================================================================
+
+# --- core: needed for every backtest -------------------------------------
 pandas>=2.0
 numpy>=1.24
-matplotlib>=3.7
-PyYAML>=6.0
-pyarrow>=12.0        # for merged .parquet bar files (tools/merge_data.py)
+PyYAML>=6.0          # reads the engine config.yaml files
+pyarrow>=12.0        # merged .parquet bar files (tools/merge_data.py)
 
-# market data
+# Time zones. `orb/timeutils.py` uses `zoneinfo`, which reads the system tz
+# database — Windows does not have one, and `server_timezone:
+# "America/New_York"` (the default in both engine configs) then fails at load.
+# Harmless everywhere else.
+tzdata>=2024.1
+
+# --- reporting ------------------------------------------------------------
+# The single-run HTML report draws inline SVG and needs nothing extra.
+# matplotlib is only used by tools/matrix_report.py, the legacy sweep summary.
+matplotlib>=3.7
+
+# --- market data ----------------------------------------------------------
+# Only needed to DOWNLOAD history or to run live. Backtesting files you
+# already have on disk does not import it.
 databento>=0.34
 
-# live execution (Windows only — install separately if you only backtest)
+# --- tests ----------------------------------------------------------------
+# The five tests/test_*.py scripts run on their own (`python tests/x.py`);
+# test_multi_engine.py and test_orb_reverse.py need pytest.
+pytest>=7.0
+
+# --- live execution -------------------------------------------------------
+# Windows only. Left commented so `pip install -r` works on Linux and macOS,
+# where the package does not exist. Install it separately to trade live:
+#     pip install MetaTrader5
 # MetaTrader5>=5.0.45

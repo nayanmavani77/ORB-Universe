@@ -1,4 +1,4 @@
-"""Breakout engine — trade the opening-range breakout.
+"""The `orb` engine — trade the opening-range breakout.
 
 The original strategy, a 1:1 port of RangeBreakoutEA.mq5 v1.70. A close beyond
 the range high buys; a close beyond the range low sells.

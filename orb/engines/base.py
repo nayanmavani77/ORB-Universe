@@ -6,7 +6,11 @@ An engine is a folder under `orb/engines/` containing the same five files:
     strategy.py   the strategy class
     settings.py   an `EngineSettings` subclass — the engine's own options
     grid.py       the sweep axes for this engine
-    README.md     what it does
+    config.yaml   the COMPLETE master configuration for this engine
+
+Those five and nothing else — `tests/test_multi_engine.py` fails an engine
+folder that grows a sixth file, so the shape stays uniform. Prose belongs in
+`docs/<engine>/README.md`, not in the package.
 
 Two rules keep engines interchangeable:
 

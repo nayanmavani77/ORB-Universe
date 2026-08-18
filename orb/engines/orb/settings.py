@@ -1,8 +1,8 @@
-"""Options for the breakout engine.
+"""Options for the `orb` engine.
 
 There are none.
 
-Everything the breakout strategy needs — `range_start`, `range_end`,
+Everything the `orb` strategy needs — `range_start`, `range_end`,
 `stop_time`, `signal_timeframe`, `sl_mode`, `risk_reward`, `lots`,
 `require_range_reentry`, `max_trades_per_session`, `close_at_stop_time`, the
 news filter — is a field of `StrategyConfig` itself, because this engine was the
@@ -15,9 +15,9 @@ The class exists anyway, empty, for two reasons:
      which is different" to remember;
   2. it turns a typo into an error. Writing
 
-         engine: breakout
+         engine: orb
          engine_options:
-           sl_range_mult: 0.75      <- belongs to the reversal engine
+           sl_range_mult: 0.75      <- belongs to the `orb_reverse` engine
 
      now fails at load with a message naming the mistake, instead of running a
      backtest that silently ignores the line.

@@ -9,7 +9,7 @@ python tools/sweep.py    --engine orb --dry-run
 
 ---
 
-The original strategy, a 1:1 port of `RangeBreakoutEA.mq5` v1.70.
+The original strategy, a 1:1 port of the MQL5 expert advisor `RangeBreakoutEA.mq5` v1.70 (the .mq5 source is not in this repo).
 
 ```yaml
 sessions:
@@ -60,7 +60,7 @@ defaults.
 
 | file | what it is |
 |---|---|
-| `strategy.py` | `OrbStrategy` — was `orb/strategy.py`, logic untouched |
+| `strategy.py` | `OrbStrategy` — moved from `orb/strategy.py`, which remains as an import shim, logic untouched |
 | `settings.py` | `OrbSettings` — empty, see above |
 | `grid.py` | the sweep axes `tools/sweep.py` uses |
 | `__init__.py` | registers the engine under the name `orb` |

@@ -9,6 +9,7 @@ away from the actual flags.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -17,21 +18,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from orb.cli import GROUP_ORDER, SPEC, config_paths, get_path   # noqa: E402
 from orb.config import AppConfig                                # noqa: E402
 
-OUT = os.path.join("docs", "CLI.md")
+#: Anchored to the repo, not to the working directory, so running this from
+#: anywhere updates the real docs/CLI.md instead of creating a stray one.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(REPO, "docs", "CLI.md")
 
 HEADER = """# Command reference
 
-Every configuration field has a flag. Command-line values **always win** over
-the config file, and the config file is never modified — so one config can
-serve any number of runs.
+The flags below belong to **`run_live.py`** and **`download_data.py`**. Those two
+tools expose every configuration field as a flag; a command-line value **always
+wins** over the config file, and the config file is never modified — so one
+config can serve any number of runs.
 
 ```bash
-python tools/backtest.py --engine orb [options]
-python run_live.py      -c config.yaml [options]
-python download_data.py -c config.yaml [options]
+python run_live.py      --engine orb [flags]
+python download_data.py [flags]
 ```
 
-`run_live.py` and `download_data.py` share the flags below; `run_live.py --help` prints the same list.
+Both default to `orb/engines/orb/config.yaml`. Point them at another engine with
+`-c orb/engines/orb_reverse/config.yaml`.
+
+**Backtesting is not on this page.** `tools/backtest.py` and `tools/sweep.py`
+have their own, much smaller flag set built around `--engine` and
+`--set NAME=VALUE`:
+
+```bash
+python tools/backtest.py --help
+python tools/sweep.py    --help
+```
 
 ## Quick start
 
@@ -39,24 +53,22 @@ python download_data.py -c config.yaml [options]
 # 1. what instruments are in my data?
 python download_data.py --list-contracts
 
-# 2. a plain run, everything from config.yaml
-python tools/backtest.py --engine orb
+# 2. download history for the configured period
+python download_data.py --start 2025-01-01 --end 2025-12-31
 
-# 3. my own settings, without touching the config file
-python tools/backtest.py --engine orb \\
-    --range 13:30-14:30 --stop-time 20:00 --utc-offset 0 \\
-    --tf M15 --rr 3 --lots 1 --sl-mode mid_range --max-trades 1 \\
-    --symbol GC --value-per-point 100 --tick-size 0.10 \\
-    --start "2024-01-01" --end "2025-12-31 22:00" \\
-    --balance 100000 --spread 2 --slippage 1 --commission 2.50 \\
-    --name my_run
+# 3. go live on the orb engine, everything from its config
+python run_live.py
+
+# 4. live on the reverse engine, with two settings changed for this run only
+python run_live.py -c orb/engines/orb_reverse/config.yaml \
+    --tf M15 --rr 2 --name live_reverse
 ```
 
 `--show-config` prints exactly what a run will use, without you having to
 guess. Every report also records its own settings in the *Performance detail*
 panel, so a report is always self-describing.
 
-## Backtest period
+## Date range
 
 | Flag | Meaning |
 |---|---|
@@ -64,8 +76,7 @@ panel, so a report is always self-describing.
 | `--end WHEN` | Last bar to use. A **date** includes that whole day; a **date and time** is exclusive. Always UTC. |
 
 ```bash
-python tools/backtest.py --engine orb --start 2025-01-01 --end 2025-06-30
-python tools/backtest.py --engine orb --start "2025-01-06 08:00" --end "2025-01-06 22:00"
+python download_data.py --start 2025-01-01 --end 2025-06-30
 ```
 
 These clamp the *data*. The daily session window is `--range` / `--stop-time`,
@@ -80,7 +91,7 @@ which are in **broker server time** — see `--utc-offset`.
 | `--show-config` | Print the resolved settings, then run. |
 | `--list-contracts` | Show the instruments in the data and exit. |
 | `--quiet` | Suppress the journal (same as `--log-level none`). |
-| `--config`, `-c` | Config file to start from (default `config.yaml`). |
+| `--config`, `-c` | Engine config to start from (default `orb/engines/orb/config.yaml`). |
 
 Boolean flags all have a negative form: `--reentry` / `--no-reentry`,
 `--close-at-stop` / `--no-close-at-stop`, `--dry-run` / `--no-dry-run`.
@@ -89,24 +100,24 @@ Typos are rejected rather than ignored — `--set strategy.risk_rewrd=3` fails
 with *unknown option 'risk_rewrd'*, and invalid values fail before any work
 starts. A run can never quietly use settings you did not intend.
 
+Credentials are **not** on this page and not in any config file. `DATABENTO_API_KEY`,
+`MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` and `MT5_TERMINAL_PATH` live in `.env`
+at the project root, which is git-ignored. See `.env.example`.
+
 """
 
 FOOTER = """
 ## Sweeping
 
-```bash
-for rr in 1.5 2 2.5 3; do
-    python tools/backtest.py --engine orb --rr $rr --out rr_$rr
-done
+Sweeps are `tools/sweep.py`, not the flags above:
 
-for tf in M5 M15 M30; do
-  for sl in mid_range full_range; do
-    python tools/sweep.py --engine orb --set risk_reward=1,2,3
-  done
-done
+```bash
+python tools/sweep.py --engine orb          --set risk_reward=1,2,3
+python tools/sweep.py --engine orb_reverse  --set sl_range_mults=0.5,0.75,1.0
 ```
 
-`--name` renames every output file, so parallel runs never overwrite each other.
+`--out` sends a run's results somewhere of your choosing; the default is
+`backtest/<engine>/<run-name>/`, so parallel runs never overwrite each other.
 
 ## Live trading extras
 
@@ -170,9 +181,26 @@ def build() -> str:
 
 
 def main() -> int:
+    # Real argparse, so `--help` prints help instead of falling through to the
+    # write branch and silently OVERWRITING docs/CLI.md — and so a typo like
+    # `--checkk` is rejected rather than treated as "not --check, so write".
+    p = argparse.ArgumentParser(
+        description="Generate docs/CLI.md from orb/cli.py.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  python tools/gen_cli_docs.py            # write docs/CLI.md
+  python tools/gen_cli_docs.py --check    # fail if it is out of date
+""")
+    p.add_argument("--check", action="store_true",
+                   help="verify docs/CLI.md matches orb/cli.py and change "
+                        "nothing; exit 1 if it is stale. This is what "
+                        "tests/test_cli.py runs.")
+    a = p.parse_args()
+
     text = build()
-    check = "--check" in sys.argv
-    os.makedirs("docs", exist_ok=True)
+    check = a.check
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
     if check:
         if not os.path.exists(OUT):
             print(f"{OUT} is missing — run: python tools/gen_cli_docs.py")

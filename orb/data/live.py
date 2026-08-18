@@ -25,8 +25,12 @@ class DatabentoLiveFeed:
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("pip install databento") from exc
         if not cfg.api_key:
-            raise RuntimeError("No Databento API key. Set `databento.api_key` or the "
-                               "DATABENTO_API_KEY environment variable.")
+            raise RuntimeError(
+                "No Databento API key. Put DATABENTO_API_KEY in `.env` at the "
+                "project root — copy `.env.example` to `.env` and fill it in. "
+                "A real environment variable of the same name also works and "
+                "wins over the file. The key is deliberately NOT in the engine "
+                "config, which is tracked in git.")
         self._db = db
         self.cfg = cfg
         self.clock = clock

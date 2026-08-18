@@ -1,8 +1,8 @@
 """The trading day: when each session opens, and when it must be flat.
 
-One definition, shared. This table previously existed as a verbatim duplicate in
-`tools/run_matrix.py` and the reversal grid — two copies that had to be
-edited together and silently disagreed if they were not.
+One definition, shared by every engine's `grid.py` and by `tools/run_matrix.py`.
+It used to be copied verbatim into each of them — several tables that had to be
+edited together and disagreed silently if they were not.
 
 Times are New York, the clock every session window in this project is written
 in.
@@ -42,6 +42,9 @@ def open_time(session: str) -> str:
 
 
 def next_session(session: str) -> str:
+    """Which session opens after this one. `stop_time` below is the usual way
+    to ask; this is the raw lookup, kept because the wrap-around (New York ->
+    Asia) is easy to get wrong by hand."""
     return SESSIONS[_key(session)][1]
 
 

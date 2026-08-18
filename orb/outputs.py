@@ -2,29 +2,34 @@
 
 One root, one folder per engine, one folder per run:
 
-    outputs/
-      breakout/
+    backtest/
+      orb/
         M5_NEW_YORK_ORB30_RR4/
           M5_NEW_YORK_ORB30_RR4.html
           M5_NEW_YORK_ORB30_RR4_trades.csv
           ...
-      reversal/
-        M15_LONDON_ORB15_RR2_SL0p75_REV/
+      orb_reverse/
+        M15_LONDON_ORB15_RR2_REV_SL0p75_RRR/
           ...
       mixed/
-        asia_breakout_london_reversal/
+        orb_orb_reverse/
           ...
 
-Before this, runs landed wherever each tool happened to default — eleven
-top-level folders (`backtest_out`, `matrix_out`, `rr_matrix_out`,
-`reversal_run`, `reversal_sweep`, `reversal_out`, `walk_forward_london`, …),
-several of them hand-renamed variants of the same run.
+`mixed/` is for a run whose sessions do NOT all use one engine, because such a
+run belongs to neither. A run with several sessions that all share an engine
+still files under that engine.
+
+Before this, runs landed wherever each tool happened to default — a dozen
+top-level folders, several of them hand-renamed variants of the same run.
 
 The FILENAMES inside a run folder are deliberately unchanged. Several tools read
 each other's output by name — `tools/matrix_report.py` opens
 `_summary/all_results.csv`, `tools/session_report.py` and the sweeps read
 `{run_name}_trades.csv` — so renaming files would break the chain for no gain.
 Only the folder they sit in is standardised.
+
+An explicit `out_dir` (from `--out`, or `backtest.out_dir` in a config) always
+wins over this layout, so a one-off run can still go anywhere.
 
 Nothing here deletes or moves an existing folder.
 """
@@ -64,7 +69,7 @@ def safe_name(name: str) -> str:
 
 def run_dir(engine: str, run_name: str, root: str = ROOT,
             create: bool = True) -> str:
-    """`outputs/<engine>/<run-name>/`."""
+    """`backtest/<engine>/<run-name>/` — see ROOT."""
     path = os.path.join(root, safe_name(engine), safe_name(run_name))
     if create:
         os.makedirs(path, exist_ok=True)

@@ -1,4 +1,4 @@
-"""Proof that the reversal engine does what it claims — and that the original
+"""Proof that the `orb_reverse` engine does what it claims — and that the original
 engine is untouched by it.
 
 The two claims that matter most:
@@ -355,7 +355,7 @@ def test_the_core_does_not_know_any_engine():
 
 def test_breakout_settings_reject_another_engines_option():
     """`engine_options` meant for the reversal must not be silently ignored by
-    the breakout engine — that would run a backtest with defaults and say
+    the `orb` engine — that would run a backtest with defaults and say
     nothing."""
     from orb.engines.orb import OrbSettings
     with pytest.raises(ValueError) as exc:

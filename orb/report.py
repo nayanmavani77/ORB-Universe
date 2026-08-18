@@ -11,9 +11,7 @@ Produces:
 """
 from __future__ import annotations
 
-import base64
 import html
-import io
 import math
 import os
 from datetime import datetime
@@ -22,14 +20,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt          # noqa: E402
-import matplotlib.dates as mdates        # noqa: E402
+from . import outputs
+from .broker import ClosedTrade
 
-from .broker import ClosedTrade          # noqa: E402
-
-# --- palette (light, colour-blind safe, consistent across every figure) ----
+# --- palette (light, colour-blind safe, consistent across the whole report) -
+# Also imported by tools/matrix_report.py (with `_CSS`), so a sweep summary and
+# a single-run report look like the same product.
 C_LINE = "#2f6f9f"
 C_POS = "#2e8b57"
 C_NEG = "#c0392b"
@@ -37,19 +33,6 @@ C_GRID = "#e3e6ea"
 C_TEXT = "#2b3038"
 C_MUTED = "#6b7280"
 
-plt.rcParams.update({
-    "figure.facecolor": "white",
-    "axes.facecolor": "white",
-    "axes.edgecolor": C_GRID,
-    "axes.labelcolor": C_TEXT,
-    "text.color": C_TEXT,
-    "xtick.color": C_MUTED,
-    "ytick.color": C_MUTED,
-    "grid.color": C_GRID,
-    "font.size": 9,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-})
 
 
 # ==========================================================================
@@ -488,106 +471,19 @@ def session_summary(result, df) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("session") if rows else pd.DataFrame()
 
 
-def _fig_to_b64(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight")
-    plt.close(fig)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def chart_equity(df: pd.DataFrame, initial: float, stats: Dict) -> str:
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True,
-                                   gridspec_kw={"height_ratios": [3, 1]})
-    if df.empty:
-        ax1.text(0.5, 0.5, "no trades", ha="center", va="center")
-        return _fig_to_b64(fig)
-
-    x = [pd.Timestamp(df["entry_time"].iloc[0])] + \
-        [pd.Timestamp(t) for t in df["exit_time"]]
-    y = [initial] + df["balance_after"].tolist()
-    ser = pd.Series(y, index=x)
-
-    ax1.plot(ser.index, ser.values, color=C_LINE, lw=1.6)
-    ax1.fill_between(ser.index, initial, ser.values,
-                     where=(ser.values >= initial), color=C_POS, alpha=0.12)
-    ax1.fill_between(ser.index, initial, ser.values,
-                     where=(ser.values < initial), color=C_NEG, alpha=0.12)
-    ax1.axhline(initial, color=C_MUTED, lw=0.8, ls="--")
-    ax1.set_ylabel("Balance")
-    ax1.set_title("Equity curve", loc="left", fontsize=11, weight="bold")
-    ax1.grid(True, lw=0.6)
-
-    if stats.get("dd_peak_time") is not None and stats.get("dd_trough_time") is not None:
-        ax1.axvspan(stats["dd_peak_time"], stats["dd_trough_time"],
-                    color=C_NEG, alpha=0.07)
-
-    dd = ser - ser.cummax()
-    ax2.fill_between(dd.index, dd.values, 0, color=C_NEG, alpha=0.35)
-    ax2.plot(dd.index, dd.values, color=C_NEG, lw=1.0)
-    ax2.set_ylabel("Drawdown")
-    ax2.grid(True, lw=0.6)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    fig.autofmt_xdate()
-    return _fig_to_b64(fig)
-
-
-def _bar_chart(index, values, title, xlabel="", rotate=0, width=11, height=3.2) -> str:
-    fig, ax = plt.subplots(figsize=(width, height))
-    colors = [C_POS if v >= 0 else C_NEG for v in values]
-    ax.bar([str(i) for i in index], values, color=colors, alpha=0.85)
-    ax.axhline(0, color=C_MUTED, lw=0.8)
-    ax.set_title(title, loc="left", fontsize=11, weight="bold")
-    ax.set_ylabel("Net P&L")
-    if xlabel:
-        ax.set_xlabel(xlabel)
-    ax.grid(True, axis="y", lw=0.6)
-    if rotate:
-        plt.setp(ax.get_xticklabels(), rotation=rotate, ha="right")
-    if len(index) > 40:
-        step = max(1, len(index) // 30)
-        for i, lbl in enumerate(ax.get_xticklabels()):
-            lbl.set_visible(i % step == 0)
-    return _fig_to_b64(fig)
-
-
-def chart_monthly_heatmap(piv: pd.DataFrame) -> str:
-    if piv.empty:
-        return ""
-    data = piv.drop(columns=["Year"], errors="ignore")
-    fig, ax = plt.subplots(figsize=(11, max(1.6, 0.45 * len(data) + 1.2)))
-    arr = data.to_numpy(dtype="float64")
-    vmax = np.nanmax(np.abs(arr)) if np.isfinite(arr).any() else 1.0
-    im = ax.imshow(arr, cmap="RdYlGn", vmin=-vmax, vmax=vmax, aspect="auto")
-    ax.set_xticks(range(len(data.columns)))
-    ax.set_xticklabels(data.columns)
-    ax.set_yticks(range(len(data.index)))
-    ax.set_yticklabels(data.index)
-    for i in range(arr.shape[0]):
-        for j in range(arr.shape[1]):
-            v = arr[i, j]
-            if np.isfinite(v):
-                ax.text(j, i, f"{v:,.0f}", ha="center", va="center", fontsize=8,
-                        color="#1b1b1b")
-    ax.set_title("Month-wise net P&L", loc="left", fontsize=11, weight="bold")
-    fig.colorbar(im, ax=ax, shrink=0.8, pad=0.01)
-    return _fig_to_b64(fig)
+# The report used to embed matplotlib PNGs here — `_fig_to_b64`,
+# `chart_equity`, `_bar_chart` and `chart_monthly_heatmap`. They were replaced
+# by `_svg_equity` and `_hbar_table` below, which draw inline SVG: sharp at any
+# zoom, styled by the same CSS as the rest of the page, and with no image
+# dependency. The matplotlib versions had no callers left, so they are gone.
 
 
 # ==========================================================================
 # HTML
 # ==========================================================================
-def _news_summary(s) -> str:
-    """One line per configured news category, for the report's setup panel."""
-    from .timeutils import NewsDays
-    parts = []
-    for _key, label, cat in s.news.items():
-        n = len(NewsDays(cat.dates))
-        if n:
-            parts.append(f"{label}: {cat.mode.upper()} ({n})")
-    n = len(NewsDays(s.news_days))
-    if n:
-        parts.append(f"General: {s.news_trading.upper()} ({n})")
-    return "<br>".join(parts) if parts else "none configured"
+# `_news_summary` lived here. It was superseded by `_news_compact` further
+# down, which fits the setup panel's two-column layout; nothing called the
+# old one any more.
 
 
 def _sessions_line(cfg) -> str:
@@ -1339,16 +1235,23 @@ def build_html(result, stats: Dict, df: pd.DataFrame,
             "whole result is worth knowing before trading all of them.",
             _hbar_table(bd["session"], cur))
 
+    # Name the engine(s) this run actually used. The title was hard-coded to
+    # the breakout engine, so an orb_reverse report was headed "Range Breakout"
+    # while the sessions table below it said otherwise.
+    engines = sorted({str(getattr(sc, "engine", "") or "orb")
+                      for sc in cfg.enabled_sessions()}) or ["orb"]
+    title = " + ".join(engines)
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Backtest - {html.escape(str(cfg.symbol.name))}</title>
+<title>{html.escape(title)} backtest - {html.escape(str(cfg.symbol.name))}</title>
 <style>{_VIZ_CSS}</style></head>
 <body class="viz"><div id="tip"></div><div class="wrap">
 
 <header>
   <div>
-    <h1>Range Breakout - backtest</h1>
+    <h1>{html.escape(title)} &mdash; backtest</h1>
     <p class="sub">{html.escape(str(cfg.symbol.name))}
       &middot; {html.escape(str(stats['period_start']))} &rarr; {html.escape(str(stats['period_end']))}
       &middot; {stats['bars_processed']:,} base bars</p>
@@ -1441,8 +1344,12 @@ including any per-session override. All times are server time.</p></div>
 def write_report(result, out_dir: Optional[str] = None,
                  name: Optional[str] = None) -> Dict[str, str]:
     cfg = result.config
-    out_dir = out_dir or cfg.backtest.out_dir
     name = name or cfg.backtest.report_name
+    # Precedence: the argument, then `backtest.out_dir` from the config, then
+    # the standard layout `backtest/<engine>/<run-name>/`. The config default is
+    # null, so a caller that sets nothing now gets the standard layout instead
+    # of the flat folder every run used to share.
+    out_dir = out_dir or cfg.backtest.out_dir or outputs.resolve(cfg, name)
     os.makedirs(out_dir, exist_ok=True)
 
     df = trades_dataframe(result.trades)
@@ -1493,40 +1400,8 @@ def write_report(result, out_dir: Optional[str] = None,
     return paths
 
 
-def print_summary(result) -> None:
-    s = compute_stats(result)
-    cur = result.config.symbol.currency
-    line = "-" * 62
-    print("\n" + line)
-    print("  RANGE BREAKOUT EA — BACKTEST SUMMARY")
-    print(line)
-    rows = [
-        ("P&L basis", pnl_basis(result.config)),
-        ("Period", f"{s['period_start']}  ->  {s['period_end']}"),
-        ("Initial balance", f"{s['initial_balance']:,.2f} {cur}"),
-        ("Final balance", f"{s['final_balance']:,.2f} {cur}"),
-        ("Net profit", f"{s['net_profit']:,.2f} {cur}  ({s['return_pct']:,.2f}%)"),
-        ("Total trades", f"{s['total_trades']:,}"),
-        ("Wins / losses", f"{s['wins']:,} / {s['losses']:,}  "
-                          f"({s['win_rate']:.1f}% win rate)"),
-        ("Profit factor", f"{s['profit_factor']:.2f}"),
-        ("Expectancy", f"{s['expectancy']:,.2f} {cur} per trade"),
-        ("Average win / loss", f"{s['avg_win']:,.2f} / {s['avg_loss']:,.2f} {cur}"),
-        ("Largest win / loss", f"{s['largest_win']:,.2f} / {s['largest_loss']:,.2f} {cur}"),
-        ("Sessions run", _sessions_line(result.config)),
-        ("Max drawdown", f"{s['max_dd_money']:,.2f} {cur}  ({s['max_dd_pct']:.2f}%)"),
-        ("Held past entry day", f"{s['held_past_entry_day']:,} trades  "
-                                f"({s['held_past_entry_day_net']:,.2f} {cur}, "
-                                f"{s['held_past_entry_day_share']:.1f}% of net)"),
-        ("Longest single hold", f"{s['max_hold_hours']:.1f} h"),
-        ("Recovery factor", f"{s['recovery_factor']:.2f}"),
-        ("Max consecutive wins", f"{s['max_consecutive_wins']}  "
-                                 f"({s['max_consecutive_wins_profit']:,.2f} {cur})"),
-        ("Max consecutive losses", f"{s['max_consecutive_losses']}  "
-                                   f"({s['max_consecutive_losses_loss']:,.2f} {cur})"),
-        ("Long / short net", f"{s['long_net']:,.2f} / {s['short_net']:,.2f} {cur}"),
-        ("Average R multiple", f"{s['avg_r']:.2f}"),
-    ]
-    for k, v in rows:
-        print(f"  {k:<24} {v}")
-    print(line + "\n")
+# `print_summary` lived here — a console table of the same stats the HTML
+# report shows. It had no callers: `tools/backtest.py` prints its own summary
+# (it knows the run name and the output folder, which this did not), and every
+# other tool reads the CSVs. Removed rather than left to drift out of step
+# with `compute_stats`.

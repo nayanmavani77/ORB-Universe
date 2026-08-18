@@ -33,10 +33,12 @@ golden_master/
 # staging area for files awaiting manual deletion
 _to_delete/
 # anything an older layout or a stray --out produced
+# backtest_out/ was the pre-restructure flat folder. No tool writes it now
+# (the default is null -> backtest/<engine>/<run-name>/), but old runs may
+# still be sitting in it.
 backtest_out/
 matrix_out*/
 rr_matrix_out*/
-reversal_*/
 walk_forward*/
 sweeps/
 outputs/

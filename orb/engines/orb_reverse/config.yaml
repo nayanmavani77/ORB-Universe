@@ -144,11 +144,18 @@ defaults:
 
   # --- journal ---
   log_level: normal               # none | normal | verbose
-  log_file: null                  # e.g. "backtest_out/journal.log"
+  log_file: null                  # e.g. "backtest/orb_reverse/journal.log"
   log_show_time: true             # prefix each line with server time
 
   # --- identification ---
-  magic: 20260814                 # InpMagic — tags this EA's orders in MT5
+  # 202609xx, so it can never collide with the orb engine's 202608xx in a
+  # merged run. Every session below sets its own; this is the fallback a
+  # session inherits when it does not, and it must still be in this engine's
+  # own band. (`runconfig.merge` refuses a run whose magics collide.)
+  magic: 20260900                 # InpMagic — tags this EA's orders in MT5
+  # This engine prefixes it with `order_tag` (default "REV"), so an order
+  # shows as "REV RangeBreak" in the terminal and a forward-direction run
+  # shows as "FWD RangeBreak" — see engines/orb_reverse/settings.py.
   comment: "RangeBreak"           # InpComment — order comment
 
 # ===========================================================================
@@ -371,15 +378,18 @@ backtest:
   pessimistic_intrabar: true      # if SL and TP are both inside one bar, SL wins
 
   # --- output ---
-  out_dir: "backtest_out"
-  report_name: "orb_backtest_report"
+  # null -> backtest/orb_reverse/<run-name>/, the standard layout every tool uses.
+  # A literal path here overrides it for every run from this file; prefer
+  # `--out somewhere` for a one-off.
+  out_dir: null
+  report_name: "orb_reverse_backtest_report"
 
 
 # ===========================================================================
 #  MetaTrader 5  (live execution only — ignored by the backtester)
 # ===========================================================================
 mt5:
-  symbol: "XAUUSDm"                    # the symbol name inside your MT5 terminal
+  symbol: "GC"                    # the symbol name inside your MT5 terminal
 
   # --- CREDENTIALS ---------------------------------------------------------
   # Your MT5 login, password and server are NOT in this file. They live in

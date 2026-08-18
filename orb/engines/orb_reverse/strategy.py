@@ -1,6 +1,6 @@
-"""The reversal strategy — fade the opening-range breakout.
+"""The `orb_reverse` strategy — fade the opening-range breakout.
 
-A subclass of the breakout strategy that overrides exactly two methods.
+A subclass of the `orb` strategy that overrides exactly two methods.
 Everything else — the range build, the breakout test, the arming and re-entry
 rules, the news filter, the stop time, the fill model — is inherited and runs
 unmodified.
@@ -9,9 +9,9 @@ unmodified.
     `_open_trade`   which way the order goes
 
 It reaches the engine through the registry (`orb/registry.py`), selected by
-`engine: reversal` on a session. It used to get there by rebinding a module
+`engine: orb_reverse` on a session. It used to get there by rebinding a module
 global, which was process-wide and therefore made it impossible to run this
-engine and the breakout engine at the same time.
+engine and the `orb` engine at the same time.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class OrbReverseStrategy(OrbStrategy):
         SELL  stop = range_low  + mult x range_size
 
     which at mult 0.5 is the range midpoint and at mult 1.0 is the opposite side
-    — the breakout engine's `mid_range` and `full_range`, reproduced exactly.
+    — the `orb` engine's `mid_range` and `full_range`, reproduced exactly.
 
     Running REVERSED the same level cannot be used. A reversed SELL entered on a
     break ABOVE the range would get a stop below its entry, which is not a stop

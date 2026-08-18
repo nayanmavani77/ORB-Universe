@@ -1,6 +1,17 @@
-# Range Breakout EA — Python port
+# ORB — opening-range trading engines
 
-A faithful Python port of **`RangeBreakoutEA.mq5` v1.70**.
+A faithful Python port of **`RangeBreakoutEA.mq5` v1.70**, grown into a small
+multi-engine platform: one core, and any number of strategies that plug into it
+by name.
+
+| engine | what it does | config | docs |
+|---|---|---|---|
+| `orb` | trade the opening-range breakout — the 1:1 port | `orb/engines/orb/config.yaml` | [`docs/orb/`](docs/orb/README.md) |
+| `orb_reverse` | fade it; stop is a multiple of the range | `orb/engines/orb_reverse/config.yaml` | [`docs/orb_reverse/`](docs/orb_reverse/README.md) |
+
+A session names the engine it runs, so several run side by side on one account —
+in backtest and live. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how, and
+[`docs/COMMANDS.md`](docs/COMMANDS.md) for every command.
 
 * **Backtesting** — Databento **DBN** files (downloaded history)
 * **Live trading** — Databento **Live** market data → **MetaTrader 5** execution
@@ -35,18 +46,43 @@ pip install -r requirements.txt
 pip install MetaTrader5
 ```
 
-Set your Databento key once:
+Then put your credentials in `.env` at the project root:
 
 ```bash
-export DATABENTO_API_KEY=db-xxxxxxxxxxxxxxxx      # Windows: setx DATABENTO_API_KEY ...
+cp .env.example .env      # Windows: copy .env.example .env
 ```
+
+```ini
+DATABENTO_API_KEY=db-xxxxxxxxxxxxxxxx
+MT5_LOGIN=12345678
+MT5_PASSWORD=your-password
+MT5_SERVER=YourBroker-Server
+MT5_TERMINAL_PATH=                    # optional
+```
+
+`.env` is git-ignored and never leaves your machine; `.env.example` is the
+committed template and stays empty. Credentials are deliberately **not** in any
+config file — config files are tracked, so a key written into one gets pushed.
+A config that carries one is refused at load, naming the variable to move it to.
+
+A real environment variable of the same name beats the file, so one command can
+point at a second account without editing anything:
+
+```powershell
+$env:MT5_LOGIN="87654321"; python run_live.py --engine orb
+```
+
+Backtesting data you already have needs no key at all.
 
 ---
 
 ## 3. Configure
 
-Everything lives in `config.yaml`. The `strategy:` block is a 1:1 copy of the
-EA's inputs — nothing else changes the trading logic.
+Each engine owns one complete config file — `orb/engines/<engine>/config.yaml`.
+**There is no parent config.** The `strategy:` block (DEFAULTS) is a 1:1 copy of
+the EA's inputs; nothing else changes the trading logic. Examples below that say
+`config.yaml` mean that engine's file — every tool defaults to the right one, so
+`-c` is rarely needed.
 
 The three settings that matter most before your first run:
 
@@ -104,7 +140,7 @@ The loader handles it in three steps:
 Inspect what you have before running anything:
 
 ```bash
-python run_backtest.py -c config.yaml --list-contracts
+python download_data.py --list-contracts
 ```
 
 The roll schedule is printed in the journal on every run:
@@ -169,7 +205,7 @@ strategy:
 or on the command line:
 
 ```bash
-python run_backtest.py --tz America/New_York --range 09:30-10:00 --stop-time 17:00
+python tools/backtest.py --engine orb --session NEW_YORK --tf M15
 ```
 
 The engine converts every bar from UTC into that zone once, at load, so the
@@ -230,7 +266,7 @@ Every category also has two command-line flags — `--cpi-*`,
 `--ppi-*`, `--ism-svc-*`:
 
 ```bash
-python run_backtest.py \
+python run_live.py \
     --cpi-dates "2026.01.13,2026.02.11" --cpi-mode off \
     --fomc-dates "2026.01.28,2026.03.18" --fomc-mode only
 ```
@@ -289,11 +325,11 @@ the valid list printed, and a bad mode name is rejected.
 Download history, then run:
 
 ```bash
-python download_data.py --config config.yaml \
+python download_data.py \
     --dataset GLBX.MDP3 --db-symbols GC.FUT --stype-in parent \
     --schema ohlcv-1m --download-start 2024-01-01 --download-end 2025-01-01
 
-python run_backtest.py --config config.yaml
+python tools/backtest.py --engine orb
 ```
 
 ### Running your own settings from the terminal
@@ -302,16 +338,27 @@ python run_backtest.py --config config.yaml
 given on the command line always win, and the config file is never modified,
 so one config can serve any number of runs.
 
-**Full reference: [`docs/CLI.md`](docs/CLI.md)** (or `run_backtest.py --help`).
+**Full reference: [`docs/CLI.md`](docs/CLI.md)** (or `run_live.py --help`).
+Backtest flags are separate: `python tools/backtest.py --help`.
+
+Backtesting — `tools/backtest.py`, a small flag set built around `--engine`:
 
 ```bash
-python run_backtest.py \
-    --range 13:30-14:30 --stop-time 20:00 --utc-offset 0 \
+python tools/backtest.py --engine orb \
+    --session NEW_YORK --orb 30 --tf M15 --rr 3 --lots 1 --max-trades 1 \
+    --news skip --start 2026-01-01 --end 2026-08-13 \
+    --out backtest/orb/my_test
+```
+
+Live and downloading — `run_live.py` / `download_data.py`, where every config
+field has a flag:
+
+```bash
+python run_live.py --engine orb \
+    --range 13:30-14:30 --stop-time 20:00 --tz America/New_York \
     --tf M15 --rr 3 --lots 1 --sl-mode mid_range --max-trades 1 \
     --symbol GC --value-per-point 100 --tick-size 0.10 \
-    --start "2025-01-06 08:00" --end "2025-12-31 22:00" \
-    --balance 100000 --spread 2 --slippage 1 --commission 2.50 \
-    --name my_run
+    --dry-run
 ```
 
 `--start` and `--end` take a plain date or a precise `'YYYY-MM-DD HH:MM'`
@@ -322,7 +369,7 @@ exclusive. These clamp the *data*; the daily session window is `--range` and
 Anything not worth its own flag is reachable with `--set`:
 
 ```bash
-python run_backtest.py --set backtest.pessimistic_intrabar=false \
+python run_live.py --set backtest.pessimistic_intrabar=false \
                        --set databento.roll_min_volume=1000
 ```
 
@@ -335,7 +382,7 @@ Sweeping is a shell loop; `--name` keeps the outputs apart:
 
 ```bash
 for rr in 1.5 2 2.5 3; do
-  python run_backtest.py --rr $rr --name rr_$rr --quiet
+  python tools/backtest.py --engine orb --rr $rr --out backtest/orb/rr_$rr
 done
 ```
 
@@ -463,43 +510,48 @@ say — will show many trades "held past entry day" with no problem at all. Read
 `Longest single hold` alongside it: 6.9 h is a normal overnight session, 79.7 h
 is a weekend you did not intend to be in.
 
-### Choosing the range window: `tools/sweep.py`
+### Sweeping settings: `tools/sweep.py`
 
-Grid-search the window over your own data instead of guessing. The data is
-loaded once, so a 48-point sweep costs one load rather than 48.
+Grid-search an engine's own axes instead of guessing. The data is loaded once,
+so a 400-run sweep costs one load rather than 400. The axes are the lists under
+`sweep:` in that engine's `config.yaml`; `--set` overrides one for this run.
 
 ```bash
-python tools/sweep.py --tz America/New_York \
-    --starts "00:00-23:30/30" --lengths 30 \
-    --stop-after 420 --split 2025-07-01
+python tools/sweep.py --engine orb --dry-run          # size it FIRST
+python tools/sweep.py --engine orb
+python tools/sweep.py --engine orb_reverse --set sl_range_mults=0.5,0.75,1 --tf M5
 ```
+
+`--dry-run` prints the run count and the axes and stops — worth doing every
+time, because the count is the product of every list and grows faster than it
+looks. `--resume` picks a long sweep back up after an interruption, and
+`-j N` sets the core count.
 
 All P&L is **gross** unless you ask otherwise — costs default to zero
 everywhere, and every report and summary states its basis on the first line
-(`P&L basis: GROSS — no spread, slippage or commission applied`). If you ever
-do want them modelled, `--spread`, `--slippage` and `--commission` are there.
+(`P&L basis: GROSS — no spread, slippage or commission applied`).
 
-Two switches exist specifically to stop a sweep flattering itself:
+Two things stop a sweep flattering itself:
 
-* `--stop-after MINUTES` derives `stop_time` from the range end. Without it, a
-  fixed stop time hands an early range a far longer trading window than a late
-  one, and the comparison is meaningless — an 18:00 range with `stop_time
-  17:00` trades for 21 hours, a 09:30 range for 7.
-* `--split DATE` reports in-sample and out-of-sample separately. A window that
-  only works in one half is a window that found the past.
+* Every session's `stop_time` comes from `orb/markets.py`, derived from when
+  the next session opens. A fixed stop time would hand an early range a far
+  longer trading window than a late one and make the comparison meaningless —
+  an 18:00 range with `stop_time 17:00` trades for 21 hours, a 09:30 range for 7.
+* Read the results per **year and per month**, not just in total. A setting
+  that lost money in two of four years and made it all back in one run has told
+  you about the regime, not about the hour. `--start` / `--end` split the
+  period; the per-run monthly CSV does the rest.
 
-Read the results per year, not just in total. A window that lost money in two
-of four years and made it all back in the bull run has told you about the
-regime, not about the hour.
-
-
+The winner of a sweep is the winner *of that sweep*. Prefer a setting sitting in
+the middle of a plateau of good neighbours over an isolated peak — the peak is
+usually the sample, not the edge.
 
 ### Adding risk:reward as a fourth dimension
 
 ```bash
 python tools/run_matrix.py --data data/gc_1m_merged.parquet \
     --start 2026-01-01 --end 2026-08-13 \
-    --rr 1:5 --light --out rr_matrix_out
+    --rr 1:5 --light --out backtest/orb/matrix
 ```
 
 `--rr 1:5` sweeps 1.0 to 5.0 in 0.5 steps, giving 54 x 9 = **486** runs
@@ -543,7 +595,7 @@ pivot is one line of pandas away.
 
 ### What the report contains
 
-`backtest_out/orb_backtest_report.html` — one self-contained file, no internet
+`backtest/<engine>/<run-name>/<run-name>.html` — one self-contained file, no internet
 needed to open it:
 
 * headline tiles — net profit, return, trades, win rate, profit factor,
@@ -594,9 +646,9 @@ python tools/run_matrix.py \
     --data data/gc_1m_merged.parquet \
     --start 2026-01-01 --end 2026-08-13 \
     --news-days news_days.txt \
-    --out matrix_out
+    --out backtest/orb/matrix
 
-python tools/matrix_report.py --dir matrix_out
+python tools/matrix_report.py --dir backtest/orb/matrix
 ```
 
 The data is loaded **once** and reused by all 54 runs — the whole matrix takes
@@ -629,7 +681,7 @@ it — the day-level skip, not just the session containing the release.
 One folder per configuration, named `TF_SESSION_ORBnn_NEWSMODE`:
 
 ```
-matrix_out/
+backtest/orb/matrix/
   M5_ASIA_ORB60_INCLUDE_NEWS/
     M5_ASIA_ORB60_INCLUDE_NEWS.html          full report
     ..._trades.csv  ..._daily_pnl.csv  ..._monthly_pnl.csv
@@ -651,8 +703,9 @@ matrix_out/
 ## 5. Live trading
 
 ```bash
-python run_live.py --config config.yaml --dry-run   # log orders, send nothing
-python run_live.py --config config.yaml             # live
+python run_live.py --engine orb --dry-run            # log orders, send nothing
+python run_live.py --engine orb                     # live
+python run_live.py --engine orb,orb_reverse         # both, one account
 ```
 
 The loop mirrors `OnTick()`: session sync, range build and stop-time handling
@@ -684,10 +737,10 @@ one implementation with two adapters.
 ```
                     ┌──────────────────────────────┐
    DBN files  ─────▶│                              │
-                    │   Engine   (orb/engine.py)   │
+                    │ MultiEngine (orb/engine.py)  │
    Databento  ─────▶│   owns the OnTick sequence   │──▶ SimBroker  (backtest)
-   Live feed        │   Strategy (orb/strategy.py) │──▶ MT5Broker  (live)
-                    │   owns every trading rule    │
+   Live feed        │  Strategy per session, from  │──▶ MT5Broker  (live)
+                    │  orb/engines/<engine>/       │
                     └──────────────────────────────┘
 ```
 
@@ -712,23 +765,51 @@ Both properties are enforced by tests rather than by convention — see below.
 ### Layout
 
 ```
-orb/
-  config.py        every MQL5 input, as a dataclass
-  timeutils.py     ParseHHMM / ParseDate / skip list / server clock
-  logger.py        [RBEA] journal, level filtering, repeat suppression
-  bars.py          Bar, MT5-aligned resampler, history store
-  strategy.py      the port itself — ComputeRange, OpenTrade, arming rules
-  engine.py        the OnTick sequence — the single source of truth
-  broker.py        Broker interface, SimBroker (backtest), MT5Broker (live)
-  backtest.py      backtest driver  (bars in, result out)
-  live_trader.py   live driver      (feed in, orders out)
-  report.py        statistics, charts, HTML report
-  cli.py           one spec table -> flags, parsing and docs
-  data/dbn.py      DBN loader + history downloader
-  data/live.py     Databento Live feed
-run_backtest.py  run_live.py  download_data.py  demo_backtest.py
-docs/CLI.md            full command reference (generated)
-tools/gen_cli_docs.py  regenerates it
+orb/                       the CORE — knows nothing about any strategy
+  config.py                every MQL5 input as a dataclass, + .env loading
+  timeutils.py             ParseHHMM / ParseDate / skip list / server clock
+  logger.py                [RBEA] journal, level filtering, repeat suppression
+  bars.py                  Bar, MT5-aligned resampler, history store
+  engine.py                the OnTick sequence — the single source of truth
+  broker.py                Broker interface, SimBroker, MT5Broker
+  backtest.py              backtest driver  (bars in, result out)
+  live_trader.py           live driver      (feed in, orders out)
+  report.py                statistics and the HTML report
+  cli.py                   one spec table -> flags, parsing and docs
+  registry.py              engine name -> strategy class
+  runconfig.py             loads engine configs; merges them for a mixed run
+  markets.py               session opens and stop times, defined once
+  outputs.py               backtest/<engine>/<run-name>/
+  strategy.py              import shim — the class moved to engines/orb/
+  data/dbn.py              DBN loader + history downloader
+  data/live.py             Databento Live feed
+
+  engines/                 one folder per engine, all the same five files
+    base.py                the contract every engine follows
+    orb/                   __init__ strategy settings grid config.yaml
+    orb_reverse/           __init__ strategy settings grid config.yaml
+
+run_live.py  download_data.py         entry points
+.env                                  credentials — git-ignored
+.env.example                          the committed template
+
+tools/
+  backtest.py              one backtest of any engine  <- the everyday tool
+  sweep.py                 sweep one engine's axes     <- the everyday tool
+  golden_master.py         24 backtests, trade for trade — the safety net
+  mt5_check.py             prove the MT5 connection before trusting it
+  merge_data.py            combine DBN files into one parquet
+  gen_cli_docs.py          regenerates docs/CLI.md
+  run_matrix.py  matrix_report.py  session_report.py     legacy research
+  reverse_study.py  walk_forward.py  verify_sources.py   legacy research
+
+docs/
+  COMMANDS.md              every command, copy-paste ready
+  CLI.md                   run_live / download_data flags (generated)
+  orb/README.md            one folder per engine
+  orb_reverse/README.md
+
+backtest/<engine>/<run-name>/         results — git-ignored
 tests/
 ```
 
@@ -737,11 +818,22 @@ tests/
 ## 7. Tests
 
 ```bash
-python -m tests.test_parity          # 118 checks — strategy rules
-python -m tests.test_single_source   # 18 checks — backtest == live
-python -m tests.test_data_layer      # 22 checks — spreads, contracts, rolls
-python -m tests.test_cli             # 33 checks — CLI covers every setting
+python tools/golden_master.py check   # 24 backtests, trade for trade
+
+python tests/test_parity.py           # 118 checks — strategy rules
+python tests/test_sessions.py         # 103 checks — multi-session behaviour
+python tests/test_single_source.py    #  20 checks — backtest == live
+python tests/test_data_layer.py       #  22 checks — spreads, contracts, rolls
+python tests/test_cli.py              #  32 checks — CLI covers every setting
+
+python -m pytest tests/test_multi_engine.py tests/test_orb_reverse.py -q
 ```
+
+`golden_master.py check` is the one to run after ANY change to the engines: it
+re-runs 24 fixed backtests — both engines, single- and multi-session, three
+timeframes, both news modes, both stop anchors, every stop multiplier — and
+compares them trade by trade, to the cent. If it is green, trading behaviour
+did not move.
 
 **`test_parity`** covers the range window boundaries (the last in-window bar is
 included, the first out-of-window bar is not), long and short breakouts, both

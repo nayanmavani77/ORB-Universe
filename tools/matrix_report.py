@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the cross-configuration comparison report from a matrix run.
 
-    python tools/matrix_report.py --dir matrix_out
+    python tools/matrix_report.py --dir backtest/orb/matrix
 
 Reads `_summary/all_results.csv` and produces `_summary/comparison.html`
 answering the four questions the test matrix was designed for: best timeframe,
@@ -91,7 +91,7 @@ def table(df, money=(), pct=(), index_name=""):
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--dir", default="matrix_out")
+    p.add_argument("--dir", default="backtest/orb/matrix")
     a = p.parse_args()
     sd = os.path.join(a.dir, "_summary")
     df = pd.read_csv(os.path.join(sd, "all_results.csv"))
@@ -183,7 +183,7 @@ def main() -> int:
             "dates and re-run to populate it:"
             "<pre>python tools/run_matrix.py --news-days news_days.txt \\\n"
             "    --data data/gc_1m_merged.parquet \\\n"
-            "    --start 2026-01-01 --end 2026-08-13 --out matrix_out</pre></div>")
+            "    --start 2026-01-01 --end 2026-08-13 --out backtest/orb/matrix</pre></div>")
     else:
         cols = ["timeframe", "session", "orb_minutes", "trades_include",
                 "trades_skip", "net_profit_include", "net_profit_skip",

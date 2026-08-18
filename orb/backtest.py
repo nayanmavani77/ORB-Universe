@@ -1,7 +1,8 @@
 """Backtest engine.
 
-Drives `OrbStrategy` over historical base bars in exactly the order
-the EA would see them live:
+Drives `MultiEngine` over historical base bars in exactly the order the EA
+would see them live. Each session builds whichever strategy its `engine` field
+resolves to, so one backtest can mix engines on one account:
 
     for each base bar:
         1. feed the resampler  -> a signal-timeframe bar may complete
@@ -22,7 +23,7 @@ from .bars import Bar
 from .broker import ClosedTrade, SimBroker
 from .config import AppConfig, journal_settings
 from .engine import Engine, MultiEngine  # noqa: F401
-from .logger import RbeaLogger, parse_log_level
+from .logger import RbeaLogger
 from .timeutils import ServerClock
 
 

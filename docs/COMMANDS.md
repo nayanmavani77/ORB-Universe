@@ -3,7 +3,7 @@
 Run everything from the project folder:
 
 ```powershell
-cd C:\Users\nayan\Desktop\ORB\orb_python
+cd <wherever you cloned this>\orb_python
 ```
 
 Every setting lives in that engine's own config file. There is no parent config.
@@ -68,13 +68,14 @@ Engine-specific options use `--set NAME=VALUE`, repeatable:
 ```powershell
 python tools\backtest.py --engine orb_reverse --set sl_range_mult=1.5
 python tools\backtest.py --engine orb_reverse --set direction=forward
-python tools\backtest.py --engine orb_reverse --set sl_range_mult=1 --set max_trades_per_session=1
+python tools\backtest.py --engine orb_reverse --set sl_range_mult=1 --max-trades 1
 ```
 
 Shorthands for the two you'll reach for most:
 
 ```powershell
 python tools\backtest.py --engine orb_reverse --sl-mult 1.5
+python tools\backtest.py --engine orb_reverse --max-trades 1     # R instead of RRR
 python tools\backtest.py --engine orb_reverse --forward --out fwd_check
 ```
 
@@ -128,6 +129,19 @@ net P&L** — with a stop-size axis, a 2.0× multiplier stakes 4× the money of 
 
 ## 6. Live
 
+First, credentials — they are never in a config file:
+
+```powershell
+copy .env.example .env
+notepad .env
+```
+
+Fill in `DATABENTO_API_KEY`, `MT5_LOGIN`, `MT5_PASSWORD` and `MT5_SERVER`
+(`MT5_TERMINAL_PATH` only if MT5 is not found automatically). `.env` is
+git-ignored; a real environment variable of the same name overrides it for one
+command. Every live entry point stops with the missing names listed rather than
+failing deep inside the MT5 client.
+
 ```powershell
 python run_live.py --engine orb
 python run_live.py --engine orb,orb_reverse
@@ -162,7 +176,14 @@ what proves trading behaviour did not move.
 ## 8. Research tools
 
 ```powershell
+# both read a matrix summary, so build one first:
+python tools\run_matrix.py --rr 1,1.5,2,2.5
+
 python tools\reverse_study.py --worst 10 --rr 1,1.5,2,2.5
 python tools\walk_forward.py collect --data data\gc_1m_merged.parquet
 python tools\walk_forward.py analyze
 ```
+
+These are one-off research scripts kept for reproducing earlier studies, not
+part of the normal loop — `tools\sweep.py` is the maintained sweep tool. They
+write under `backtest\orb\matrix\` and `backtest\orb_reverse\`.

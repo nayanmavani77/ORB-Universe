@@ -393,6 +393,12 @@ def _apply_run_overrides(session: StrategyConfig, o: Dict[str, Any],
         session.risk_reward = float(o["risk_reward"])
     if o.get("lots") is not None:
         session.lots = float(o["lots"])
+    if o.get("max_trades_per_session") is not None:
+        # A SESSION field, deliberately not an engine option — it is enforced in
+        # one place, and when it briefly lived in both a config asking for 3
+        # trades took 6. Exposed as a flag here so `--set` never has to reach
+        # for it (which `EngineSettings.from_options` correctly refuses).
+        session.max_trades_per_session = int(o["max_trades_per_session"])
     if o.get("log_level"):
         session.log_level = str(o["log_level"])
     if o.get("news"):

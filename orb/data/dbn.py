@@ -387,8 +387,12 @@ def download_history(cfg, out_dir: Optional[str] = None) -> str:
         raise RuntimeError("pip install databento") from exc
 
     if not cfg.api_key:
-        raise RuntimeError("No Databento API key. Set `databento.api_key` in the "
-                           "config or the DATABENTO_API_KEY environment variable.")
+        raise RuntimeError(
+            "No Databento API key. Put DATABENTO_API_KEY in `.env` at the "
+            "project root — copy `.env.example` to `.env` and fill it in. A "
+            "real environment variable of the same name also works and wins "
+            "over the file. The key is deliberately NOT in the engine config, "
+            "which is tracked in git.")
     out_dir = out_dir or cfg.output_dir
     os.makedirs(out_dir, exist_ok=True)
     safe = str(cfg.symbols).replace("/", "_").replace(",", "-")

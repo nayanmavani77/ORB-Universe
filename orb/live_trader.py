@@ -3,10 +3,12 @@
 This module contains NO trading logic and no tick sequencing. It only:
 
   * pulls bars off the Databento live feed,
-  * hands them to `Engine` — the same object the backtester drives,
+  * hands them to `MultiEngine` — the same object the backtester drives,
   * journals exits that happened on the broker's server.
 
-Everything that decides a trade lives in `orb.engine` / `orb.strategy`.
+Everything that decides a trade lives in the engine a session names:
+`orb/engines/<engine>/strategy.py`, reached through `orb.registry`. Because the
+lookup is per session, a live account can run several engines side by side.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ from .broker import MT5Broker
 from .config import AppConfig, journal_settings
 from .data.live import DatabentoLiveFeed
 from .engine import Engine, MultiEngine  # noqa: F401
-from .logger import RbeaLogger, parse_log_level
+from .logger import RbeaLogger
 from .timeutils import ServerClock
 
 

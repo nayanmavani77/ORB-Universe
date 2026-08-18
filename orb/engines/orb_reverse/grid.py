@@ -1,4 +1,4 @@
-"""Sweep axes for the reversal engine.
+"""Sweep axes for the `orb_reverse` engine.
 
 Session windows come from `orb.markets` — the shared table. This file used to
 carry a verbatim copy of it, with a comment arguing the duplication was
@@ -19,7 +19,7 @@ from .settings import FORWARD, REVERSE, OrbReverseSettings
 TIMEFRAMES = ["M1", "M5", "M15"]
 ORB_MINUTES = [15, 30, 60]
 RISK_REWARD = [1.0, 1.5, 2.0, 2.5, 3.0]
-# 0.5 and 1.0 are the breakout engine's two stop modes; the rest is ground it
+# 0.5 and 1.0 are the `orb` engine's two stop modes; the rest is ground it
 # cannot reach.
 SL_RANGE_MULTS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
 # 1 = R, 2 = RR, 3 = RRR, 0 = unlimited

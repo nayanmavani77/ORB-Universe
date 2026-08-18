@@ -8,7 +8,7 @@ unchanged strategy. Only configuration differs between runs, so the results are
 directly comparable.
 
     python tools/run_matrix.py --data data/gc_1m_merged.parquet \
-        --start 2026-01-01 --end 2026-08-13 --out matrix_out
+        --start 2026-01-01 --end 2026-08-13 --out backtest/orb/matrix
 
 Session definitions — all in America/New_York, DST-aware
 --------------------------------------------------------
@@ -50,7 +50,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd                                          # noqa: E402
 
 from orb.backtest import make_clock, run_backtest            # noqa: E402
-from orb.config import AppConfig                             # noqa: E402
+from orb.config import AppConfig
+from orb import markets
+from orb.timeutils import NewsDays                             # noqa: E402
 from orb.data.dbn import load_dbn_bars                       # noqa: E402
 from orb.logger import RbeaLogger, parse_log_level           # noqa: E402
 from orb.report import compute_stats, write_report           # noqa: E402
@@ -68,23 +70,13 @@ ORB_MINUTES = [15, 30, 60]
 RR_VALUES = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
 NEWS_MODES = [("INCLUDE_NEWS", "on"), ("SKIP_NEWS", "off")]
 
-# name -> (open time in New York, the session that opens next)
-SESSIONS = {
-    "ASIA":     ("19:00", "LONDON"),
-    "LONDON":   ("03:00", "NEW_YORK"),
-    "NEW_YORK": ("09:30", "ASIA"),
-}
-SESSION_ORDER = ["ASIA", "LONDON", "NEW_YORK"]
-
-# A session normally trades until the next one opens.  New York is the
-# exception: the next session (Asia) opens at 19:00, but the contract rolls at
-# 18:00 — the CME open — so trading to 19:00 would leave a position sitting
-# across the instrument change and take the whole calendar spread as a fake
-# move.  16:55 stops New York before the 17:00 COMEX halt, which is where the
-# position should be flat anyway.
-SESSION_STOP_OVERRIDE = {
-    "NEW_YORK": "16:55",
-}
+# The trading day comes from `orb/markets.py` — ONE definition, shared with
+# `orb/engines/*/grid.py`. It used to be copied here verbatim, which meant two
+# tables that had to be edited together and disagreed silently if they were not.
+# Re-exported under the old names so nothing that imports them here breaks.
+SESSIONS = markets.SESSIONS
+SESSION_ORDER = markets.SESSION_ORDER
+SESSION_STOP_OVERRIDE = markets.SESSION_STOP_OVERRIDE
 
 
 def _light_outputs(result, folder: str, name: str) -> None:
@@ -101,13 +93,20 @@ def _light_outputs(result, folder: str, name: str) -> None:
         os.path.join(folder, f"{name}_stats.csv"), header=False)
 
 
-def add_minutes(hhmm: str, minutes: int) -> str:
-    return (datetime.strptime(hhmm, "%H:%M")
-            + timedelta(minutes=minutes)).strftime("%H:%M")
+#: also from orb/markets.py — re-exported so callers of this module keep working
+add_minutes = markets.add_minutes
 
 
 def build_configs(base: AppConfig, news_dates: str, rr_values):
-    """The configuration grid, in the order the specification lists it."""
+    """The configuration grid, in the order the specification lists it.
+
+    `news_dates` is REPORTING ONLY — it is recorded in run_info.json so a run
+    can be identified later, and is deliberately not applied here. The dates
+    themselves live in the config's news categories; what this grid varies is
+    only HOW they are applied (the SKIP_NEWS / INCLUDE_NEWS halves below).
+    Kept in the signature because `tools/walk_forward.py` and
+    `tools/reverse_study.py` call this function positionally.
+    """
     out = []
     for tf in TIMEFRAMES:
         for news_label, news_mode in NEWS_MODES:
@@ -162,9 +161,12 @@ def main() -> int:
                    help="bar data (overrides the config)")
     p.add_argument("--start", default="2026-01-01")
     p.add_argument("--end", default="2026-08-13")
-    p.add_argument("--out", default="matrix_out")
+    p.add_argument("--out", default=os.path.join("backtest", "orb", "matrix"),
+                   help="output folder (default: %(default)s)")
     p.add_argument("--news-days", default=None,
-                   help="News Days list, or a path to a file of dates")
+                   help="News Days list, or a path to a file of dates. "
+                        "RECORDED ONLY — the dates this grid filters on come "
+                        "from the config's news categories; see build_configs.")
     p.add_argument("--only", default=None,
                    help="run only configurations whose name contains this")
     p.add_argument("--rr", default=None,
@@ -185,12 +187,10 @@ def main() -> int:
         news_dates = open(news_dates, encoding="utf-8").read()
     if not news_dates.strip():
         # fall back to whatever the config already holds (categories + general)
-        from orb.timeutils import NewsDays
         parts = [c.dates for _k, _l, c in base.strategy.news.items() if c.dates]
         if base.strategy.news_days:
             parts.append(base.strategy.news_days)
         news_dates = ",".join(parts)
-    from orb.timeutils import NewsDays
     n_news = len(NewsDays(news_dates))
 
     os.makedirs(a.out, exist_ok=True)

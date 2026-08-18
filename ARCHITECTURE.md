@@ -47,6 +47,7 @@ backtest/
   orb/sweep/_summary/
   orb_reverse/<run-name>/
   orb_reverse/sweep/_summary/
+  mixed/<engine>_<engine>/  a run whose sessions do not all share one engine
 
 tools/                      backtest.py  sweep.py  golden_master.py  ...
 tests/
@@ -75,8 +76,8 @@ python tools/backtest.py --engine orb,orb_reverse
 ```
 
 ```
-session   asia    [orb]          19:00-19:30 -> 02:55   magic 20260801
-session   london  [orb_reverse]  03:00-03:15 -> 09:30   magic 20260901
+session   new_york  [orb]          09:30-10:00 -> 16:55   magic 20260803
+session   london    [orb_reverse]  03:00-03:15 -> 09:30   magic 20260901
 ```
 
 Each session runs the engine of the file it is written in, so nothing is
@@ -211,7 +212,8 @@ and `LiveTrader` drive the same `MultiEngine`.
 ### What this replaced
 
 A second strategy used to be reached by rebinding
-`orb.engine.RangeBreakoutStrategy` — a process-wide monkey-patch, in three
+`orb.engine.RangeBreakoutStrategy` (the class is now `OrbStrategy`) — a
+process-wide monkey-patch, in three
 separate copies. Two consequences:
 
 - **two engines could never run together** — whichever patch was active applied
@@ -236,7 +238,7 @@ have the `orb` strategy reporting an `orb_reverse` exit.
    logger=)`. Subclass an existing engine if you are varying one.
 3. `settings.py` — an `EngineSettings` subclass.
 4. `grid.py` — `AXES` and a `build()` returning `GridItem`s.
-5. `config.yaml` — the six sections above.
+5. `config.yaml` — the sections above.
 6. `__init__.py` — `register("<name>", Strategy, Settings, description=...)`,
    plus the `Strategy` / `Settings` aliases.
 7. Import it in `orb/engines/__init__.py`.
@@ -254,18 +256,61 @@ description, constructor signature correct, settings round-trip, grid returns
 One vocabulary. Core field names win; engine settings adopt them, with the old
 spelling kept as an alias so existing configs keep loading.
 
-| concept | canonical | aliases still accepted |
+| concept | canonical | old spelling |
 |---|---|---|
-| trades per session | `max_trades_per_session` | `max_trades` |
-| bar timeframe | `signal_timeframe` | `timeframe` |
-| stop multiplier | `sl_range_mult` | `mult` |
-| stop anchor | `sl_anchor` | `anchor` |
-| direction | `direction: forward\|reverse` | `reverse: bool` |
-| order label | `comment` / `order_tag` | `tag` |
+| trades per session | `max_trades_per_session` (a **session** field) | `max_trades` — **rejected**, see below |
+| bar timeframe | `signal_timeframe` | `timeframe` — **rejected** |
+| stop multiplier | `sl_range_mult` | `mult` — still loads |
+| stop anchor | `sl_anchor` | `anchor` — still loads |
+| direction | `direction: forward\|reverse` | `reverse: bool` — **rejected** |
+| order label | `comment` / `order_tag` | `tag` — still loads |
 | run identity | `run_name` | `name`, `report_name`, `label()` |
 
-Session opens live once, in `orb/markets.py`. There used to be two verbatim
-copies of that table.
+Aliases live in one place — an engine's `ALIASES` map in its `settings.py` — and
+cover only engine options. There is no alias machinery in `orb/config.py`, so a
+retired **core** spelling is reported (`Unknown option(s) in 'strategy': [...]`)
+rather than silently accepted. `max_trades` is the important one: it was never
+an engine option, it is a session field, and `EngineSettings.from_options`
+refuses the mix-up because when the field existed in both places only one of
+them was enforced — a config asking for 3 trades took 6.
+
+Session opens live once, in `orb/markets.py`, imported by every engine's
+`grid.py` and by `tools/run_matrix.py`. There used to be a verbatim copy in
+each.
+
+---
+
+## Credentials
+
+Not in any config file. An engine `config.yaml` is a tracked source file, so a
+key written into one is committed and pushed the moment the run is shared.
+
+```
+.env             real values — git-ignored, never leaves the machine
+.env.example     the committed template, deliberately empty
+```
+
+| variable | needed for |
+|---|---|
+| `DATABENTO_API_KEY` | downloading history, and live data |
+| `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` | live execution |
+| `MT5_TERMINAL_PATH` | only if MT5 is not found automatically |
+
+`orb/config.py` loads `.env` itself — a dozen lines of parsing rather than a
+dependency — and a **real environment variable wins over the file**, so one
+command can point at a second account without editing anything:
+
+```powershell
+$env:MT5_LOGIN="87654321"; python run_live.py --engine orb
+```
+
+Enforced in both directions. `apply_secrets` is the only thing that ever writes
+those fields, and `reject_config_secrets` refuses a config file that carries
+one, naming the variable to move it to. `run_live.py`, `download_data.py` and
+`tools/mt5_check.py` each stop with the missing names listed rather than
+failing deep inside the MT5 or Databento client — `mt5_check.py` in particular,
+because without credentials it would otherwise attach to whatever terminal
+happened to be open and report a pass the EA could never reproduce.
 
 ---
 
@@ -274,7 +319,11 @@ copies of that table.
 ```
 backtest/<engine>/<run-name>/
 backtest/<engine>/sweep/_summary/
+backtest/mixed/<engine>_<engine>/
 ```
+
+`mixed/` is only for a run whose sessions genuinely use different engines — a
+run with several sessions all on one engine still files under that engine.
 
 `--out` still overrides it. **Filenames inside a run folder are unchanged** —
 several tools read each other's output by name (`{run_name}_trades.csv`,
@@ -300,11 +349,11 @@ the cent. All 24 identical across the whole restructure.
 |---|---|
 | `python tests/test_parity.py` | 118 |
 | `python tests/test_sessions.py` | 103 |
-| `python tests/test_cli.py` | 33 |
+| `python tests/test_cli.py` | 32 |
 | `python tests/test_data_layer.py` | 22 |
 | `python tests/test_single_source.py` | 20 |
-| `python -m pytest tests/test_orb_reverse.py` | 29 |
-| `python -m pytest tests/test_multi_engine.py` | 29 |
+| `python -m pytest tests/test_orb_reverse.py` | 28 |
+| `python -m pytest tests/test_multi_engine.py` | 45 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

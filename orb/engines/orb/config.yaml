@@ -76,7 +76,7 @@ sessions:
     # Switch this on and run `--engine orb,orb_reverse` to trade Asia with the
     # breakout while London fades, on one account. Each session keeps the
     # engine of the file it is written in, so nothing is restated.
-    enabled: false
+    enabled: true
     range_start: "19:00"          # Asia open
     range_end:   "19:30"
     stop_time:   "02:55"          # flat before London opens
@@ -95,7 +95,7 @@ sessions:
     magic: 20260802
 
   new_york:
-    enabled: true
+    enabled: false
     range_start: "09:30"          # New York open
     range_end:   "10:00"
     stop_time:   "16:55"          # flat before the 17:00 COMEX halt
@@ -117,14 +117,14 @@ sessions:
 defaults:
 
   # --- signal ---
-  signal_timeframe: "M5"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
+  signal_timeframe: "M1"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
                                   # the bar that must CLOSE beyond the range
 
   # --- risk ---
   sl_mode: mid_range              # InpSLMode: mid_range | full_range
                                   #   mid_range  — stop at the range midpoint
                                   #   full_range — stop at the opposite side
-  risk_reward: 4.0                # InpRR — target = this x the stop distance
+  risk_reward: 2.0                # InpRR — target = this x the stop distance
   lots: 1.0                       # InpLots
 
   # --- entries ---
@@ -134,17 +134,20 @@ defaults:
                                   #         the next breakout is taken
                                   # false — the very next candle closing
                                   #         outside the range opens a new trade
-  max_trades_per_session: 0       # InpMaxTradesPerSession (0 = unlimited)
+  max_trades_per_session: 2       # InpMaxTradesPerSession (0 = unlimited)
   close_at_stop_time: true        # InpCloseAtStopTime — flatten at stop_time.
                                   # Required when more than one session is on.
 
   # --- journal ---
   log_level: normal               # none | normal | verbose
-  log_file: null                  # e.g. "backtest_out/journal.log"
+  log_file: null                  # e.g. "backtest/orb/journal.log"
   log_show_time: true             # prefix each line with server time
 
   # --- identification ---
-  magic: 20260814                 # InpMagic — tags this EA's orders in MT5
+  # 202608xx, so it can never collide with the orb_reverse engine's 202609xx
+  # in a merged run. Every session below sets its own; this is the fallback a
+  # session inherits when it does not.
+  magic: 20260800                 # InpMagic — tags this EA's orders in MT5
   comment: "RangeBreak"           # InpComment — order comment
 
 # ===========================================================================
@@ -367,7 +370,10 @@ backtest:
   pessimistic_intrabar: true      # if SL and TP are both inside one bar, SL wins
 
   # --- output ---
-  out_dir: "backtest_out"
+  # null -> backtest/orb/<run-name>/, the standard layout every tool uses.
+  # A literal path here overrides it for every run from this file; prefer
+  # `--out somewhere` for a one-off.
+  out_dir: null
   report_name: "orb_backtest_report"
 
 
@@ -375,7 +381,7 @@ backtest:
 #  MetaTrader 5  (live execution only — ignored by the backtester)
 # ===========================================================================
 mt5:
-  symbol: "XAUUSDm"                    # the symbol name inside your MT5 terminal
+  symbol: "GC"                    # the symbol name inside your MT5 terminal
 
   # --- CREDENTIALS ---------------------------------------------------------
   # Your MT5 login, password and server are NOT in this file. They live in

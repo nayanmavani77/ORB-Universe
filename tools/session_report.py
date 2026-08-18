@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Session-wise performance report, built from a matrix summary file.
 
-    python tools/session_report.py --summary rr_matrix_out/_summary/all_results.csv \
-                                   --out matrix_summaries/session_performance.html
+    python tools/session_report.py --summary backtest/orb/matrix/_summary/all_results.csv \
+                                   --out backtest/orb/matrix/_summary/session_performance.html
 
 Answers one question: how does each session behave, and under what settings?
 Every number is aggregated from configurations that already ran — this reads

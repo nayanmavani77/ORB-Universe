@@ -8,18 +8,22 @@ in the same process. That is what this module removes.
 
 An engine registers itself once:
 
-    register("breakout", OrbStrategy,
+    register("orb", OrbStrategy, OrbSettings,
              description="Trade the opening-range breakout.")
 
 and a session names it in config:
 
     sessions:
       london:
-        engine: reversal
+        engine: orb_reverse
 
 `Engine` then asks `resolve(cfg.engine)` for the class to build. Since the
 lookup happens per session, Asia can run one engine while London runs another,
 in the same process, in both backtest and live.
+
+The registered names are the folder names under `orb/engines/` — today `orb`
+and `orb_reverse`. `available()` lists them, and an unknown name is reported
+with that list rather than silently falling back.
 
 Nothing in `orb/` outside this file imports `orb.engines` at module scope. The
 registry bootstraps itself on first use instead, so importing `orb.engine`
@@ -113,11 +117,15 @@ def names() -> List[str]:
 
 
 def specs() -> List[EngineSpec]:
+    """Every registered spec, in name order. Public API for tools that want to
+    describe the engines rather than build one — `names()` is the usual call."""
     _bootstrap()
     return [_ENGINES[k] for k in sorted(_ENGINES)]
 
 
 def is_registered(name: str) -> bool:
+    """Is this name registered? A membership test that does not raise, for
+    callers validating user input before `resolve()`."""
     _bootstrap()
     return _norm(name) in _ENGINES
 

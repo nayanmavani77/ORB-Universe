@@ -175,6 +175,18 @@ def main() -> int:
     a = p.parse_args()
 
     known = available()
+    if "," in str(a.engine):
+        # tools/backtest.py accepts `--engine orb,orb_reverse` to merge engines
+        # onto one account. A sweep varies ONE engine's axes, so the same
+        # spelling here is a mistake worth naming rather than reporting as an
+        # unknown engine.
+        print(f"A sweep runs one engine at a time, so --engine takes a single "
+              f"name (got {a.engine!r}).\n"
+              f"Sweep each in turn:\n" +
+              "\n".join(f"    python tools/sweep.py --engine {e.strip()}"
+                        for e in str(a.engine).split(",") if e.strip()),
+              file=sys.stderr)
+        return 2
     if a.engine not in known:
         print(f"Unknown engine '{a.engine}'. Available: {', '.join(known)}",
               file=sys.stderr)
@@ -186,14 +198,20 @@ def main() -> int:
         rc.period["end"] = a.end
     if a.data:
         rc.period["data"] = a.data
-    if a.out:
-        rc.sweep["out_dir"] = a.out
 
     over = {"sessions": _strs(a.sessions), "timeframes": _strs(a.timeframes),
             "orb_minutes": _ints(a.orb_minutes),
             "risk_reward": _floats(a.risk_reward), "news": _strs(a.news)}
     over = {k: v for k, v in over.items() if v is not None}
     valid_axes = set(rc.sweep) - {"out_dir", "save_trades"}
+    # The shorthand flags above (--session/--tf/--orb/--rr/--news) name axes
+    # too, so they get the same check --set gets below. Both engines have all
+    # five today; an engine that omits one should say so, not sweep a phantom.
+    unknown = sorted(set(over) - valid_axes)
+    if unknown:
+        print(f"'{a.engine}' has no sweep axis/axes {unknown}. "
+              f"Axes: {', '.join(sorted(valid_axes))}", file=sys.stderr)
+        return 2
     for pair in a.axes:
         if "=" not in pair:
             print(f"--set needs AXIS=V1,V2 (got {pair!r})", file=sys.stderr)
@@ -213,7 +231,7 @@ def main() -> int:
     start, end = rc.dates()
     out = a.out or rc.sweep_out_dir() or sweep_dir([a.engine], "sweep")
     print("=" * 74)
-    print("  REVERSAL SWEEP")
+    print(f"  SWEEP — {a.engine}")
     print("=" * 74)
     print(f"  engine         {a.engine}")
     print(f"  config file    {os.path.relpath(rc.path)}")
