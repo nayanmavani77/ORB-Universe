@@ -286,24 +286,37 @@ each.
 arrives — the analogue of MT5's `iTime` changing, and correct in a backtest
 where the next bar is always available immediately.
 
-Live it costs a full bar. Databento emits a 1-minute bar the moment it
+Live it costs a whole bar. Databento emits a 1-minute bar the moment it
 completes, so the EA HAS the finished 09:34 bar at 09:35:00 — but the resampler
 held it until the 09:35 bar turned up at 09:36:00, while the backtest fills at
-the open of the bar after the signal (09:35:00). Live was one minute behind its
+the open of the bar after the signal (09:35:00). Live was a minute behind its
 own backtest on every trade, entering that much further past the range.
 
-`Engine.close_due_bar` closes the forming bar once the clock passes its end
-plus `IDLE_CLOSE_GRACE_SECONDS` for delivery. Measured on the live loop:
+Two mechanisms, measured on the live loop for a bar finishing at 03:03:00 with
+one-second polls:
 
-| | acted |
-|---|---|
-| wait for the next bar | 03:04:05 |
-| close on the clock | **03:03:10** |
+| | acted | |
+|---|---|---|
+| wait for the next bar | 03:04:01 | the original behaviour |
+| `close_due_bar` — the clock passed the bar's end + grace | 03:03:10 | fallback |
+| `_close_if_bar_completed` — the completing bar arrived | **03:03:01** | normal path |
 
-for a bar that finished at 03:03:00 — about 55 seconds recovered. The decision
-is unchanged; only the waiting is removed. `run_backtest` never calls
-`on_idle`, so this cannot reach a backtest, and a bar the clock closed is not
-closed again if a late base bar re-opens its bucket.
+The second is the fallback for a bucket whose final base bar never arrives at
+all (a minute with no trades), where nothing but the clock can say the bar is
+over. The first is the normal path: the arriving bar IS the news.
+
+**Gated on the BROKER, not on live-vs-backtest.** `Broker.prices_from_bars`
+says whether a broker takes its price from the bars it is fed or from a live
+quote it can ask for at any instant. `SimBroker` fills at the open of the bar
+the EA reacted on, so it cannot price a decision until the next bar exists —
+closing early there fills a whole bar stale. `MT5Broker` reads a tick on
+demand, so it can. `tests/test_single_source.py` drives the live path with a
+SimBroker to prove live and backtest agree trade-for-trade, and it caught this
+the moment the gate was wrongly set to live-vs-backtest.
+
+The remaining latency is the feed's own: Databento's emission plus network,
+about a second. Cutting it further would mean a finer schema (`ohlcv-1s`, or
+trades) and building bars here.
 
 ---
 
@@ -460,7 +473,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_late_start.py` | 15 |
 | `python -m pytest tests/test_range_window.py` | 9 |
 | `python -m pytest tests/test_exit_journal.py` | 10 |
-| `python -m pytest tests/test_bar_timing.py` | 7 |
+| `python -m pytest tests/test_bar_timing.py` | 10 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

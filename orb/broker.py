@@ -147,6 +147,17 @@ class Broker(ABC):
         """
         return 0
 
+    #: Does this broker take its price from the BARS it is fed, or from a live
+    #: quote it can ask for at any instant?
+    #:
+    #: `SimBroker` fills at the open of the bar the EA reacted on, so it can
+    #: only price a decision once the NEXT bar exists. `MT5Broker` reads a tick
+    #: whenever it is asked, so it can price a decision the moment a bar
+    #: closes. `Engine.eager_close` — acting the instant a bar completes rather
+    #: than waiting for its successor — is only possible on the second kind,
+    #: which is why the engine is gated on this rather than on live-vs-backtest.
+    prices_from_bars: bool = True
+
     # A price LEVEL from the feed cannot be sent to a broker quoting a
     # different instrument: GC and XAUUSD track each other but sit tens of
     # dollars apart. Only the DISTANCES survive the crossing. When this is
@@ -207,6 +218,9 @@ class SimBroker(Broker):
         # so signal space and execution space are identical and levels carry
         # across unchanged
         self.translate_levels = False
+        # fills come from the bars this broker is fed, so a decision cannot be
+        # priced until the next bar exists — see `Broker.prices_from_bars`
+        self.prices_from_bars = True
 
     # -- market context ---------------------------------------------------
     def set_market(self, price: float, now: datetime) -> None:
@@ -388,6 +402,9 @@ class MT5Broker(Broker):
                 "Install it on Windows with:  pip install MetaTrader5"
             ) from exc
         self.mt5 = mt5
+        # a live quote is available at any instant, so a decision can be priced
+        # the moment a bar closes — see `Broker.prices_from_bars`
+        self.prices_from_bars = False
         self.cfg = mt5_cfg
         self.spec = spec
         # `magic` may be a single number or every session's magic. The EA owns

@@ -14,11 +14,25 @@ backtest fills at the open of the bar after the signal, i.e. 09:35:00. Live was
 therefore systematically one minute behind its own backtest, entering further
 past the range every time.
 
-`Engine.close_due_bar` closes the forming bar once the clock has passed its
-end plus a short grace for delivery. Nothing about the decision changes — the
-same completed bar goes through the same `_tick`. `run_backtest` never calls
-`on_idle`, so a backtest cannot reach it; tools/golden_master.py proves that
-over 24 runs.
+TWO fixes, in order of how much they recover:
+
+  * `Engine._close_if_bar_completed` (`eager_close`) — the arriving bar IS the
+    news. A 1-minute bar labelled 09:34 covers 09:34:00-09:34:59 and is emitted
+    at 09:35:00, so the moment it lands the M1 signal bar is finished. Same for
+    M15 once its 03:14 base bar arrives. Nothing is left to wait for.
+  * `Engine.close_due_bar` — the fallback, for a bucket whose final base bar
+    never arrives at all (a minute with no trades), where only the clock can
+    say the bar is over.
+
+Measured on the live loop, for a bar finishing at 03:03:00 with 1-second polls:
+
+    wait for the next bar     03:04:01   (+61s)
+    clock close + grace       03:03:10   (+10s)
+    close on arrival          03:03:01   (+1s)
+
+Nothing about the decision changes — the same completed bar goes through the
+same `_tick`. Neither path is reachable from `run_backtest`, which never idles
+and never sets `eager_close`; tools/golden_master.py proves that over 24 runs.
 
     python -m pytest tests/test_bar_timing.py -q
 """
@@ -48,12 +62,17 @@ def m1(minute, price, spread=0.0):
     return Bar(t, price, price + spread, price - spread, price, 1)
 
 
+#: how often the simulated loop polls. Kept at one second because these tests
+#: measure LATENCY — a coarser tick would hide the very thing under test.
+POLL_SECONDS = 1
+
+
 class Clock:
     def __init__(self, start):
         self.now = start
 
     def __call__(self, bar=None):
-        self.now += timedelta(seconds=5)
+        self.now += timedelta(seconds=POLL_SECONDS)
         return self.now
 
 
@@ -88,9 +107,32 @@ class Spy(RbeaLogger):
         self.events.append((self.clock.now, msg))
 
 
-def live_run(grace, bars=None):
+class TickBroker(SimBroker):
+    """A SimBroker that claims live-quote pricing.
+
+    These tests measure LATENCY — when the decision is taken — not fill price,
+    so a bar-priced simulator is fine underneath. The flag is what a real
+    `MT5Broker` sets, and it is what `Engine.eager_close` is gated on:
+    `tests/test_single_source.py` uses a plain SimBroker and therefore keeps
+    the slower, bar-for-bar path that matches the backtest exactly.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        # set AFTER super().__init__, which assigns the instance attribute —
+        # a class-level override alone is silently overwritten
+        self.prices_from_bars = False
+
+
+def live_run(grace, bars=None, eager=True):
     original = Engine.IDLE_CLOSE_GRACE_SECONDS
     Engine.IDLE_CLOSE_GRACE_SECONDS = grace
+    real_feed = Engine.feed
+    if not eager:
+        def no_eager(self, bar, now):
+            self.eager_close = False
+            return real_feed(self, bar, now)
+        Engine.feed = no_eager
     try:
         cfg = RunConfig.load("orb_reverse").app_config({})
         for s in cfg.sessions.values():
@@ -105,12 +147,13 @@ def live_run(grace, bars=None):
                     + [m1(182 + i, 4460 + i) for i in range(8)])   # breaks UP
         clock = Clock(BASE + timedelta(minutes=179, seconds=30))
         log = Spy(clock)
-        trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
+        trader = LiveTrader(cfg, broker=TickBroker(cfg.symbol, 100000.0),
                             feed=Feed(bars, clock), logger=log)
-        trader.run(poll_seconds=0, max_polls=400, now_fn=clock)
+        trader.run(poll_seconds=0, max_polls=2000, now_fn=clock)
         return log.events, trader
     finally:
         Engine.IDLE_CLOSE_GRACE_SECONDS = original
+        Engine.feed = real_feed
 
 
 def first(events, needle):
@@ -121,26 +164,41 @@ def first(events, needle):
 
 
 # --------------------------------------------------------------------------
-def test_a_breakout_is_acted_on_as_soon_as_its_bar_is_finished():
-    """The 03:02 bar completes and is delivered at 03:03:00. The EA must act
-    then, not when the 03:03 bar arrives a minute later."""
+BAR_CLOSED = BASE + timedelta(minutes=183)        # the 03:02 bar ends 03:03:00
+
+
+def test_a_breakout_is_acted_on_the_moment_its_bar_arrives():
+    """The tightest requirement. The 03:02 bar finishes and is delivered at
+    03:03:00; the EA must act within a poll of that, not after a grace period
+    and not after the next bar."""
     events, _ = live_run(grace=10)
-    when, msg = first(events, "BREAKOUT")
+    when, _ = first(events, "BREAKOUT")
     assert when is not None, "no breakout at all"
-    assert when < BASE + timedelta(minutes=183, seconds=30), (
-        f"acted at {when:%H:%M:%S} — still waiting for the next bar")
+    lag = (when - BAR_CLOSED).total_seconds()
+    assert lag <= POLL_SECONDS + 1, f"acted {lag:.0f}s after the bar closed"
+
+
+def test_the_grace_period_is_no_longer_on_the_critical_path():
+    """With eager close off, the 10s grace shows up. With it on, it must not —
+    proving the speed comes from closing on arrival, not from a shorter wait."""
+    slow, _ = live_run(grace=10, eager=False)
+    fast, _ = live_run(grace=10, eager=True)
+    t_slow, _ = first(slow, "BREAKOUT")
+    t_fast, _ = first(fast, "BREAKOUT")
+    assert (t_slow - BAR_CLOSED).total_seconds() >= 9
+    assert (t_fast - BAR_CLOSED).total_seconds() <= POLL_SECONDS + 1
 
 
 def test_the_old_behaviour_really_was_a_bar_late():
-    """Guards the guard: with the clock-close disabled the lag comes back, so
-    the test above is measuring something real."""
-    late, _ = live_run(grace=NEVER)
+    """Guards the guard: with both fixes disabled the lag comes back, so the
+    tests above are measuring something real."""
+    late, _ = live_run(grace=NEVER, eager=False)
     early, _ = live_run(grace=10)
     t_late, _ = first(late, "BREAKOUT")
     t_early, _ = first(early, "BREAKOUT")
     assert t_late is not None and t_early is not None
     gained = (t_late - t_early).total_seconds()
-    assert gained >= 45, f"only {gained:.0f}s recovered — expected most of a bar"
+    assert gained >= 55, f"only {gained:.0f}s recovered — expected a whole bar"
 
 
 def test_the_range_is_built_without_waiting_for_the_next_bar():
@@ -149,8 +207,10 @@ def test_the_range_is_built_without_waiting_for_the_next_bar():
     events, _ = live_run(grace=10)
     when, _ = first(events, "Range built")
     assert when is not None, "the range was never built"
-    assert when < BASE + timedelta(minutes=181, seconds=30), (
-        f"range built at {when:%H:%M:%S} — a bar late")
+    # the window's last bar (03:00) is delivered at 03:01:00
+    lag = (when - (BASE + timedelta(minutes=181))).total_seconds()
+    assert lag <= POLL_SECONDS + 1, (
+        f"range built {lag:.0f}s after its last bar arrived")
 
 
 def test_a_bar_is_never_processed_twice():
@@ -163,12 +223,55 @@ def test_a_bar_is_never_processed_twice():
         f"a bar was judged twice: {bars_named}")
 
 
-def test_the_engine_tracks_what_the_clock_closed():
-    """The de-duplication key. It must stay None until a clock-close happens,
-    which is what keeps a backtest out of this path entirely."""
-    _, trader = live_run(grace=NEVER)
+def test_a_bar_priced_broker_never_closes_early():
+    """The gate. A SimBroker fills at the open of the bar the EA reacted on, so
+    it cannot price a decision until the next bar exists — closing early there
+    would fill a whole bar stale. Caught by test_single_source when the gate
+    was briefly live-vs-backtest instead of broker capability."""
+    from orb.broker import MT5Broker
+    assert SimBroker.prices_from_bars is True
+    assert MT5Broker.__init__ is not None          # flag is set in __init__
+    cfg = RunConfig.load("orb_reverse").app_config({})
+    for s in cfg.sessions.values():
+        s.enabled = (s.name == "london")
+
+    class Feed0:
+        def start(self): pass
+        def stop(self): pass
+        def poll(self, timeout=1.0): return None
+
+    trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
+                        feed=Feed0(), logger=RbeaLogger(level=0))
+    trader.run(poll_seconds=0, max_polls=3,
+               now_fn=Clock(BASE + timedelta(minutes=179)))
+    for e in trader.engine.engines:
+        assert e.eager_close is False, "a bar-priced broker closed bars early"
+
+
+def test_a_backtest_never_closes_a_bar_early():
+    """Both fast paths are opt-in and only `LiveTrader` opts in."""
+    from orb.backtest import run_backtest
+    from orb.engine import MultiEngine
+    cfg = RunConfig.load("orb_reverse").app_config({})
+    for s in cfg.sessions.values():
+        s.enabled = (s.name == "london")
+    engine = MultiEngine(cfg.enabled_sessions(),
+                         SimBroker(cfg.symbol, 100000.0),
+                         logger=RbeaLogger(level=0))
+    for e in engine.engines:
+        assert e.eager_close is False, "a fresh engine closes bars early"
+        assert e._last_clock_closed is None
+    bars = [m1(180 + i, 4450 + (i % 3), spread=1.0) for i in range(40)]
+    run_backtest(cfg, bars, logger=RbeaLogger(level=0))
+
+
+def test_the_base_bar_length_is_learned_from_the_feed():
+    """`eager_close` needs to know how long an incoming bar is. A wrong value
+    would close buckets early and truncate a range, so it is learned from the
+    feed and only ever shrinks."""
+    _, trader = live_run(grace=10)
     for engine in trader.engine.engines:
-        assert engine._last_clock_closed is None
+        assert engine.base_seconds == 60, engine.base_seconds
 
 
 def test_a_backtest_never_closes_a_bar_on_the_clock():

@@ -42,10 +42,20 @@ class Engine:
         self.log = logger or RbeaLogger()
         self.store = store if store is not None else BarStore()
         self.resampler = Resampler(timeframe_seconds(cfg.signal_timeframe))
-        #: LIVE ONLY. Open time of the last bar closed by the clock rather than
-        #: by the next bar's arrival — see `close_due_bar`. Stays None in a
-        #: backtest, which never idles.
+        #: LIVE ONLY. Open time of the last bar closed early rather than by the
+        #: next bar's arrival — see `close_due_bar` / `eager_close`. Stays None
+        #: in a backtest, which never sets either.
         self._last_clock_closed: Optional[datetime] = None
+
+        #: LIVE ONLY, set by `LiveTrader`. When true, a timeframe bar is closed
+        #: the INSTANT the base bar that completes it arrives, instead of
+        #: waiting for the clock or for the next bar. See `feed`.
+        self.eager_close = False
+        #: length of one incoming base bar, in seconds. Needed to know whether
+        #: an arriving bar reaches the end of its bucket. Learned from the feed
+        #: if not supplied.
+        self.base_seconds: Optional[int] = None
+        self._prev_bar_time: Optional[datetime] = None
         # Which strategy this session runs is a per-session lookup, not a name
         # fixed in this file. That is what lets two sessions run two different
         # engines in one process; before, a second engine could only be reached
@@ -72,14 +82,55 @@ class Engine:
         several sessions through the identical tick sequence. Nobody else should
         call this — `on_bar` is the entry point for a single session.
         """
+        self._learn_base_seconds(bar)
         closed_tf = self.resampler.push(bar)
         if (closed_tf is not None and self._last_clock_closed is not None
                 and closed_tf.time <= self._last_clock_closed):
-            # `close_due_bar` already emitted this bucket; a late base bar
-            # re-opened it. Dropping the repeat keeps one bar = one decision.
+            # already emitted early; a late base bar re-opened the bucket.
+            # Dropping the repeat keeps one bar = one decision.
             closed_tf = None
+        if closed_tf is None and self.eager_close:
+            closed_tf = self._close_if_bar_completed(bar)
         self._tick(now, closed_tf)
         return closed_tf
+
+    def _learn_base_seconds(self, bar: Bar) -> None:
+        """Work out how long one incoming bar is, from the feed itself.
+
+        Only ever shrinks, so one gap in the data cannot make the engine think
+        bars are longer than they are.
+        """
+        prev, self._prev_bar_time = self._prev_bar_time, bar.time
+        if prev is None:
+            return
+        delta = int((bar.time - prev).total_seconds())
+        if delta > 0 and (self.base_seconds is None or delta < self.base_seconds):
+            self.base_seconds = delta
+
+    def _close_if_bar_completed(self, bar: Bar) -> Optional[Bar]:
+        """Close the timeframe bar the moment the base bar that finishes it
+        arrives. LIVE ONLY — `eager_close` is set by `LiveTrader`.
+
+        The bar that arrives IS the news. A 1-minute bar labelled 09:34 covers
+        09:34:00-09:34:59 and Databento emits it at 09:34:60 — so the instant it
+        lands, the M1 signal bar for 09:34 is finished and there is nothing left
+        to wait for. Same for M15: once the 03:14 base bar arrives, the
+        03:00-03:15 signal bar is complete.
+
+        Waiting any longer is pure latency. `close_due_bar` remains as the
+        fallback for a bucket whose final base bar never arrives at all (a
+        minute with no trades), where nothing signals completion but the clock.
+        """
+        cur = self.resampler.current
+        if cur is None or not self.base_seconds:
+            return None
+        bucket_end = cur.time + timedelta(seconds=self.resampler.tf_seconds)
+        if bar.time + timedelta(seconds=self.base_seconds) < bucket_end:
+            return None                       # more of this bucket still to come
+        closed = self.resampler.flush()
+        if closed is not None:
+            self._last_clock_closed = closed.time
+        return closed
 
     #: LIVE ONLY. Seconds after a bar's interval ends before the engine will
     #: close it on the clock rather than wait for the next bar. Databento emits

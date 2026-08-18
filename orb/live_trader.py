@@ -24,6 +24,20 @@ from .logger import RbeaLogger
 from .timeutils import ServerClock
 
 
+#: how long one bar of each Databento OHLCV schema covers. Used to tell the
+#: engine when an arriving bar finishes its timeframe bucket, so the decision
+#: can be taken immediately instead of after a safety wait.
+_SCHEMA_SECONDS = {
+    "ohlcv-1s": 1, "ohlcv-1m": 60, "ohlcv-1h": 3600, "ohlcv-1d": 86400,
+}
+
+
+def _schema_seconds(schema) -> Optional[int]:
+    """Bar length for a Databento schema, or None if it is not a bar schema.
+    None is safe: the engine then learns the spacing from the feed itself."""
+    return _SCHEMA_SECONDS.get(str(schema or "").strip().lower())
+
+
 class LiveTrader:
     def __init__(self, cfg: AppConfig, logger: Optional[RbeaLogger] = None,
                  broker=None, feed=None, clock: Optional[ServerClock] = None):
@@ -448,6 +462,16 @@ class LiveTrader:
             # covers. `None` for the start means there was no warm-up at all,
             # so everything before now is missing. A range window overlapping
             # this cannot be trusted — see `_range_window_has_a_hole`.
+            # Act the instant a bar is finished, not a grace period later —
+            # but ONLY if the broker can price a decision at that instant.
+            # A bar-priced broker (SimBroker) fills at the open of the bar the
+            # EA reacted on, so it cannot price anything until the NEXT bar
+            # exists; closing early there would fill at a price a whole bar
+            # stale. `tests/test_single_source.py` drives this very path with a
+            # SimBroker to prove live and backtest agree trade-for-trade, and
+            # that proof is worth more than shaving seconds off a simulation.
+            engine.eager_close = not getattr(self.broker, "prices_from_bars", True)
+            engine.base_seconds = _schema_seconds(self.cfg.databento.schema)
             engine.strategy.coverage_gap = (
                 self._warmup_bars[-1].time if self._warmup_bars else None,
                 started_at)
