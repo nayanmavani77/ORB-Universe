@@ -99,7 +99,7 @@ sessions:
       direction: reverse
 
   new_york:
-    enabled: false
+    enabled: true
     range_start: "09:05"
     range_end:   "09:06"
     stop_time:   "16:55"
