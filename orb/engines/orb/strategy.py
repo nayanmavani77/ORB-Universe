@@ -74,6 +74,7 @@ class OrbStrategy:
         self.range_mid = 0.0
         self.trades_this_session = 0
         self.armed = False
+        self._late_start_warned = False
         self.closed_at_stop = False
         self.last_bar_time: Optional[datetime] = None
 
@@ -203,6 +204,15 @@ class OrbStrategy:
         self.range_mid = (hi + lo) / 2.0
         self.range_valid = hi > lo
         self.armed = self.range_valid           # ready for the first breakout
+        # A range rebuilt from downloaded history — i.e. the EA started AFTER
+        # the window closed — arms exactly as it would have live, which is
+        # faithful to the MQL5 EA on attach. It is NOT what a backtest of the
+        # same day would have done: the backtest took the FIRST close beyond
+        # the range, hours ago and much nearer the edge. Starting late means
+        # entering later, further from the range, with a larger stop for the
+        # same lot size. Say so, rather than let the journal imply the two are
+        # the same trade. Detection only — nothing here changes what is traded.
+        self._late_start_warned = False
         d = self.broker.digits
         self.log.info(
             "Range built {a}..{b} | High {hi} | Low {lo} | Mid {mid} | size {sz} "
@@ -544,6 +554,23 @@ class OrbStrategy:
                     f"Not armed: bar {fmt_dt(closed_open)} closed at "
                     f"{closed_close:.{d}f}, still outside the range.")
             return
+
+        # A late start shows up here: the very first bar the EA judges is
+        # already beyond the range, which means the real first breakout of this
+        # session happened while it was not running.
+        if not self._late_start_warned and self.armed and not inside_range:
+            self._late_start_warned = True
+            side = "below" if closed_close < self.range_low else "above"
+            edge = (self.range_low if closed_close < self.range_low
+                    else self.range_high)
+            self.log.warn(
+                f"Late start: the first bar this session judged had ALREADY "
+                f"closed {side} the range ({closed_close:.{d}f} vs "
+                f"{edge:.{d}f}). The session's first breakout happened before "
+                f"the EA was running, so this entry is later and further from "
+                f"the range than a backtest of the same day would show — the "
+                f"stop is measured from here, so the risk per trade is larger. "
+                f"Start the EA before the range window to avoid it.")
 
         # 7. breakout signals
         buy_signal = closed_close > self.range_high

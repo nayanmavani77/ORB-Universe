@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from .bars import Bar
@@ -453,8 +453,19 @@ class MT5Broker(Broker):
         return self.price_for(is_buy) - ref if ref else 0.0
 
     def server_time(self) -> datetime:
+        """Now, as MT5 sees it. NAIVE and in UTC.
+
+        `utcfromtimestamp`/`utcnow` are deprecated and are scheduled for
+        removal, so the aware form is used and the tzinfo stripped. It stays
+        naive deliberately: every timestamp in this system is naive-UTC, and
+        returning an aware value here would make it uncomparable with the bar
+        times it is checked against.
+        """
         tick = self.mt5.symbol_info_tick(self.symbol)
-        return datetime.utcfromtimestamp(tick.time) if tick else datetime.utcnow()
+        if tick:
+            return datetime.fromtimestamp(tick.time, tz=timezone.utc).replace(
+                tzinfo=None)
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     # -- interface --------------------------------------------------------
     def ask(self) -> float:
@@ -545,7 +556,9 @@ class MT5Broker(Broker):
             is_buy=(chosen.type == self.mt5.POSITION_TYPE_BUY),
             lots=chosen.volume,
             entry_price=chosen.price_open,
-            entry_time=datetime.utcfromtimestamp(chosen.time),
+            # naive UTC, matching every other timestamp in the system
+            entry_time=datetime.fromtimestamp(
+                chosen.time, tz=timezone.utc).replace(tzinfo=None),
             sl=chosen.sl, tp=chosen.tp,
             comment=chosen.comment, magic=chosen.magic,
         )
