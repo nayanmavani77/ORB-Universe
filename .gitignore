@@ -1,67 +1,68 @@
 # ===========================================================================
-#  ORB Universe — files git should not track
+#  What must never reach GitHub: market data, reports, trade files.
+#
+#  Two rules do most of the work — the output ROOTS below — but the file-type
+#  rules are kept as well, because a run can be pointed anywhere with `--out`
+#  and results written outside the standard folders must still be ignored.
 # ===========================================================================
 
-# --- market data -----------------------------------------------------------
-# Databento files and the merged parquet are large (30 MB+) and fully
-# reproducible: download_data.py fetches them, tools/merge_data.py rebuilds
-# the merged file. Keeping them out keeps the repo small and clone-able.
-#   python tools/merge_data.py -d "data/gc_ohlcv1m_parent_*.dbn.zst" \
-#                              -o data/gc_1m_merged.parquet
-data/*.parquet
-data/*.dbn
-data/*.dbn.zst
-data/*.csv
-data/*.pq
+# --- market data ----------------------------------------------------------
+# Large, slow to clone, and not ours to redistribute.
+data/*
 !data/.gitkeep
+!data/README.md
+*.parquet
+*.dbn
+*.dbn.zst
+*.pq
 
-# --- backtest output -------------------------------------------------------
-# Every run regenerates these. Committing them means a diff on every backtest.
+# --- run outputs ----------------------------------------------------------
+# Everything a run produces: backtest/<engine>/<run-name>/ and the sweeps.
+backtest/
+# the 24-case behaviour baseline — regenerate with
+#   python tools/golden_master.py record
+golden_master/
+# staging area for files awaiting manual deletion
+_to_delete/
+# anything an older layout or a stray --out produced
 backtest_out/
-matrix_out/
-matrix_out_*/
-rr_matrix_out/
-rr_matrix_out_*/
+matrix_out*/
+rr_matrix_out*/
+reversal_*/
+walk_forward*/
 sweeps/
-test_freerun/
-*_trades.csv
-*_equity.csv
-*_stats.csv
-*_pnl.csv
-journal.log
+outputs/
+matrix_summaries/
+
+# --- reports --------------------------------------------------------------
+# Every generated report. No HTML in this project is source.
+*.html
+
+# --- trade files and result tables ----------------------------------------
+# No CSV in this project is source either — the config is YAML and the news
+# calendar lives in it. If you ever add a source CSV, force it with:
+#     git add -f path/to/file.csv
+*.csv
+*.csv.gz
+*.tsv
+all_results.csv
+run_info.json
+collect_info.json
+*_summary/
+
+# --- journals -------------------------------------------------------------
 *.log
 
-# --- local config copies ---------------------------------------------------
-# config.yaml IS tracked (it has no secrets — api_key and MT5 login are null).
-# Keep it that way: put real credentials in environment variables instead.
-#   DATABENTO_API_KEY=...
-# These are personal backups, not shared configuration.
-config.yaml.bak
-config.yaml.bak*
-config.local.yaml
-.env
+# --- archives and backups -------------------------------------------------
+*.zip
+*.gz
+*.bak
+*.bak[0-9]
 
-# --- python ----------------------------------------------------------------
+# --- python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-build/
-dist/
-
-# --- virtual environments --------------------------------------------------
 .venv/
 venv/
-env/
-ENV/
-
-# --- editors / OS ----------------------------------------------------------
-.vscode/
-.idea/
-*.swp
 .DS_Store
-Thumbs.db
-desktop.ini
