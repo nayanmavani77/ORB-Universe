@@ -280,6 +280,39 @@ each.
 
 ---
 
+## The coverage gap
+
+Two data sources feed a live run, and neither covers the seam between them:
+
+```
+   downloaded history  |<-------------------->|
+                                              |<-- gap -->|
+   live subscription                                      |<------------->|
+                       ...                    T_hist      T_start      now
+```
+
+`T_hist` is where Databento's HISTORICAL API stops — it lags the live feed by
+minutes, and asking for anything past it rejects the whole query, not just the
+tail (`LiveTrader._history_end` clamps to it). `T_start` is when the
+subscription begins. The bars in between exist, but no source hands them over.
+
+For a range window that opens after `T_start` this is irrelevant, and for one
+that closed long before it the warm-up covers everything. It bites in exactly
+one case: **the EA is started while a range window is in progress**. Then part
+of the window is downloaded, part is live, and the middle is missing.
+
+Observed: starting at 03:07 with history to 02:57 built London's 03:00-03:15
+range from a single bar covering 03:07-03:14 — a range of 2.00 where the true
+one was far wider — and traded it without a word.
+`OrbStrategy._range_window_has_a_hole` now skips such a session. Note that
+`_is_late_session` does NOT catch it: the EA started before the window ended,
+so by that test it is not late.
+
+The remedy is the same as for late starts: start the EA before the range
+window, or leave it running.
+
+---
+
 ## Late starts
 
 An EA that starts after a session's range window has closed has missed that
@@ -398,6 +431,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_multi_engine.py` | 45 |
 | `python -m pytest tests/test_live_feed.py` | 18 |
 | `python -m pytest tests/test_late_start.py` | 15 |
+| `python -m pytest tests/test_range_window.py` | 9 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

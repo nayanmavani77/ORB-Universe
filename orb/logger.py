@@ -80,6 +80,12 @@ class RbeaLogger:
         if self.first_time_this_session(key):
             self.info(msg)
 
+    def warn_once(self, key: str, msg: str) -> None:
+        """As `info_once`, at WARN. For a condition that should be seen but
+        would otherwise repeat on every tick."""
+        if self.first_time_this_session(key):
+            self.warn(msg)
+
     def close(self) -> None:
         if self._fh:
             self._fh.close()

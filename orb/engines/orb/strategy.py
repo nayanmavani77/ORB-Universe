@@ -76,6 +76,16 @@ class OrbStrategy:
         self.armed = False
         self.closed_at_stop = False
         self.last_bar_time: Optional[datetime] = None
+        #: OPEN time of the last bar filed into history — see `ingest_bar`
+        self.last_ingested_time: Optional[datetime] = None
+
+        #: LIVE ONLY. `(from, to)` that neither the warm-up download nor the
+        #: live subscription covers — the historical API always lags the live
+        #: feed by minutes, and those minutes belong to neither. `from` is None
+        #: when there is no warm-up at all, meaning everything before the EA
+        #: started is missing. A range window that overlaps this cannot be
+        #: trusted; see `_range_window_has_a_hole`.
+        self.coverage_gap = None
 
         #: Server time the EA began running. LIVE ONLY — `run_backtest` never
         #: sets it, so every rule keyed on it is inert in a backtest and the
@@ -208,6 +218,52 @@ class OrbStrategy:
     # Range building  (MQL5: ComputeRange)
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
+    def _window_bars_are_in(self) -> bool:
+        """Has the LAST timeframe bar of the range window closed and been filed?
+
+        A timeframe bar only closes when the next one starts, so at the exact
+        instant the window ends its final bar is still forming. In a backtest
+        that is invisible: `_tick` runs only when a bar arrives, and the bar
+        that ends the window is ingested immediately before `on_time`. Live,
+        `on_idle` ticks every second, so `on_time` reaches this point at the
+        stroke of the window end — before the feed has delivered anything.
+
+        The range was then built from an empty store. For a 30-minute M1 window
+        that quietly lost the last bar; for London's 15-minute window on M15 —
+        exactly ONE bar — it lost the only one, and the session was skipped
+        every single day with "No bars inside range window". Reproduced by
+        driving the live loop through a full window with bars flowing normally.
+
+        `last_bar_time` is the OPEN time of the most recently filed bar, so the
+        window's final bar has arrived once it reaches `session_end - one bar`.
+        """
+        if self.last_ingested_time is None:
+            return False
+        return self.last_ingested_time >= (self.session_end
+                                           - timedelta(seconds=self.tf_seconds))
+
+    def _warn_waiting_for_window(self, now: datetime) -> None:
+        """Say so if the wait above becomes unusually long.
+
+        Normally it lasts until the next bar arrives — seconds. A long wait
+        means the feed has gone quiet, and a range that is never built is a
+        session that never trades, which should not pass in silence.
+        """
+        # A session whose trading window has already closed is not waiting for
+        # anything — that is just the previous day's session sitting in the
+        # past at start-up, and warning about it is pure noise.
+        if self.stop_enabled and now >= self.trade_until:
+            return
+        late = (now - self.session_end).total_seconds()
+        if late > max(120.0, 2 * self.tf_seconds):
+            self.log.warn_once(
+                "rangewait",
+                f"Range for {fmt_dt(self.session_start)}.."
+                f"{fmt_time(self.session_end)} is still waiting for the "
+                f"window's last {self.cfg.signal_timeframe} bar, "
+                f"{late/60:.0f} min after the window closed. No bars are "
+                f"arriving — the session cannot trade until they do.")
+
     def _is_late_session(self) -> bool:
         """Did this session's range window close before the EA started?
 
@@ -309,9 +365,57 @@ class OrbStrategy:
             f"one — a breakout the EA has actually witnessed, rather than one "
             f"it would be entering hours late and far from the range.")
 
+    def _range_window_has_a_hole(self) -> bool:
+        """Does this range window fall inside data neither source covered?
+
+        The warm-up downloads history, which the API only serves up to some
+        minutes behind now; the live subscription starts when the EA does.
+        Between those two instants is a gap that no bar ever fills.
+
+        For a window that opens after the EA started this is irrelevant, and
+        for one that closed long before it, the warm-up covers everything. It
+        bites in exactly one case: the EA is started WHILE a range window is in
+        progress. Then part of the window is downloaded, part is live, and the
+        minutes in between are simply absent — so the high and low are computed
+        from a window with a hole in it.
+
+        Observed: starting at 03:07 with history to 02:57 built London's
+        03:00-03:15 range from a single bar covering 03:07-03:14, a range of
+        2.00 where the true one was far wider. Nothing warned, and the session
+        traded it. `_is_late_session` does not catch this — the EA started
+        BEFORE the window ended, so by that test it is not late.
+        """
+        if not self.coverage_gap:
+            return False
+        gap_from, gap_to = self.coverage_gap
+        if gap_to <= self.session_start:
+            return False                      # gap ended before the window
+        if gap_from is not None and gap_from >= self.session_end:
+            return False                      # gap started after the window
+        return True
+
     def _compute_range(self) -> None:
         bars = self.store.window(self.session_start, self.session_end)
         self.range_computed = True
+
+        if self._range_window_has_a_hole():
+            gap_from, gap_to = self.coverage_gap
+            missing = ("everything before the EA started"
+                       if gap_from is None
+                       else f"{fmt_time(gap_from)}..{fmt_time(gap_to)}")
+            self.range_valid = False
+            self._session_blocked = True
+            self.log.warn(
+                f"[{(self.cfg.name or 'MAIN')}] Range window "
+                f"{fmt_dt(self.session_start)}..{fmt_time(self.session_end)} "
+                f"overlaps data NO source covered ({missing}) — the EA was "
+                f"started while the window was still open, and the downloaded "
+                f"history stops minutes short of the live feed. A high and low "
+                f"taken from {len(bars)} of the window's bars would not be the "
+                f"real range, so this session is skipped. Start the EA before "
+                f"{fmt_time(self.session_start)} to trade it.")
+            return
+
         if not bars:
             self.range_valid = False
             self.log.warn(
@@ -588,9 +692,12 @@ class OrbStrategy:
         self.log.clock_time = now
         self._sync_session(now)
 
-        # 1. build the range once the window has finished
+        # 1. build the range once the window has finished AND its bars are in
         if not self.range_computed and now >= self.session_end:
-            self._compute_range()
+            if self._window_bars_are_in():
+                self._compute_range()
+            else:
+                self._warn_waiting_for_window(now)
 
         # 2. stop time reached -> optionally flatten, then wait for next session
         if self.stop_enabled and now >= self.trade_until:
@@ -632,6 +739,13 @@ class OrbStrategy:
         next one — which is exactly the tick on which ComputeRange() runs.
         """
         self.store.add(bar)
+        # Recorded HERE, where a bar actually enters history, and deliberately
+        # not reused from `last_bar_time` — that one is set in `on_bar_closed`,
+        # which runs AFTER `on_time` and returns early outside the trading
+        # window. Gating the range build on it deadlocks: no range, so
+        # `on_bar_closed` bails, so nothing is recorded, so no range. This
+        # field has exactly one job and no early exits.
+        self.last_ingested_time = bar.time
 
     def on_bar_closed(self, bar: Bar, now: datetime) -> None:
         """Steps 4-7 of OnTick, driven by a freshly closed signal-timeframe bar."""

@@ -389,6 +389,13 @@ class LiveTrader:
             # Injected rather than imported so the strategy never depends on
             # the backtest module, and so tests can supply a stub.
             engine.strategy.session_replay = self._replay_session
+            # The minutes neither the warm-up download nor the live feed
+            # covers. `None` for the start means there was no warm-up at all,
+            # so everything before now is missing. A range window overlapping
+            # this cannot be trusted — see `_range_window_has_a_hole`.
+            engine.strategy.coverage_gap = (
+                self._warmup_bars[-1].time if self._warmup_bars else None,
+                started_at)
 
         try:
             signal.signal(signal.SIGINT, lambda *_: self._shutdown())
