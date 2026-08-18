@@ -379,7 +379,7 @@ backtest:
 #  MetaTrader 5  (live execution only — ignored by the backtester)
 # ===========================================================================
 mt5:
-  symbol: "GC"                    # the symbol name inside your MT5 terminal
+  symbol: "XAUUSDm"                    # the symbol name inside your MT5 terminal
 
   # --- CREDENTIALS ---------------------------------------------------------
   # Your MT5 login, password and server are NOT in this file. They live in
