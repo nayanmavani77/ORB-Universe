@@ -100,8 +100,8 @@ sessions:
 
   new_york:
     enabled: true
-    range_start: "10:03"
-    range_end:   "10:04"
+    range_start: "10:05"
+    range_end:   "10:06"
     stop_time:   "16:55"
     magic: 20260903
     max_trades_per_session: 10
