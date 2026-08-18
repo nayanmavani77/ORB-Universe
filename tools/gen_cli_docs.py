@@ -26,24 +26,24 @@ the config file, and the config file is never modified — so one config can
 serve any number of runs.
 
 ```bash
-python run_backtest.py  -c config.yaml [options]
+python tools/backtest.py --engine orb [options]
 python run_live.py      -c config.yaml [options]
 python download_data.py -c config.yaml [options]
 ```
 
-All three share the flags below. `run_backtest.py --help` prints the same list.
+`run_live.py` and `download_data.py` share the flags below; `run_live.py --help` prints the same list.
 
 ## Quick start
 
 ```bash
 # 1. what instruments are in my data?
-python run_backtest.py --list-contracts
+python download_data.py --list-contracts
 
 # 2. a plain run, everything from config.yaml
-python run_backtest.py
+python tools/backtest.py --engine orb
 
 # 3. my own settings, without touching the config file
-python run_backtest.py \\
+python tools/backtest.py --engine orb \\
     --range 13:30-14:30 --stop-time 20:00 --utc-offset 0 \\
     --tf M15 --rr 3 --lots 1 --sl-mode mid_range --max-trades 1 \\
     --symbol GC --value-per-point 100 --tick-size 0.10 \\
@@ -64,8 +64,8 @@ panel, so a report is always self-describing.
 | `--end WHEN` | Last bar to use. A **date** includes that whole day; a **date and time** is exclusive. Always UTC. |
 
 ```bash
-python run_backtest.py --start 2025-01-01 --end 2025-06-30
-python run_backtest.py --start "2025-01-06 08:00" --end "2025-01-06 22:00"
+python tools/backtest.py --engine orb --start 2025-01-01 --end 2025-06-30
+python tools/backtest.py --engine orb --start "2025-01-06 08:00" --end "2025-01-06 22:00"
 ```
 
 These clamp the *data*. The daily session window is `--range` / `--stop-time`,
@@ -96,12 +96,12 @@ FOOTER = """
 
 ```bash
 for rr in 1.5 2 2.5 3; do
-    python run_backtest.py --rr $rr --name rr_$rr --quiet
+    python tools/backtest.py --engine orb --rr $rr --out rr_$rr
 done
 
 for tf in M5 M15 M30; do
   for sl in mid_range full_range; do
-    python run_backtest.py --tf $tf --sl-mode $sl --name ${tf}_${sl} --quiet
+    python tools/sweep.py --engine orb --set risk_reward=1,2,3
   done
 done
 ```

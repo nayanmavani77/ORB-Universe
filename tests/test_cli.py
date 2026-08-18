@@ -182,7 +182,7 @@ check("every flag appears in docs/CLI.md", undocumented, [])
 
 # ==========================================================================
 print("\n--- entry points still parse ----------------------------------------")
-for script in ("run_backtest.py", "run_live.py", "download_data.py"):
+for script in ("run_live.py", "download_data.py"):
     r = subprocess.run([sys.executable, script, "--help"],
                        capture_output=True, text=True)
     check(f"{script} --help", r.returncode, 0)

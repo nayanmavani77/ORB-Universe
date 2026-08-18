@@ -76,7 +76,7 @@ sessions:
     range_end:   "03:15"          # 15-minute opening range
     stop_time:   "09:30"          # flat when New York opens
     signal_timeframe: "M15"
-    risk_reward: 1.0
+    risk_reward: 2.0
     magic: 20260901
     # 1=R  2=RR  3=RRR  0=unlimited. A SESSION setting, not an engine option —
     # the core enforces it, so it belongs here where the core reads it.
