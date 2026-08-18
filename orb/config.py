@@ -536,8 +536,7 @@ class AppConfig:
             server_utc_offset_hours=raw.get("server_utc_offset_hours", 0.0),
             server_timezone=raw.get("server_timezone"),
         )
-        if not cfg.databento.api_key:
-            cfg.databento.api_key = os.environ.get("DATABENTO_API_KEY")
+        apply_secrets(cfg)
 
         # ---- sessions ------------------------------------------------
         raw_sessions = raw.get("sessions")
@@ -693,3 +692,117 @@ def journal_settings(cfg):
     show_time = next((s.log_show_time for s in sessions
                       if s.log_show_time is not None), cfg.strategy.log_show_time)
     return level, file_path, bool(show_time)
+
+
+# ==========================================================================
+#  Secrets
+# ==========================================================================
+#: the file credentials live in — project root, never committed
+ENV_FILE = ".env"
+
+_DOTENV_LOADED = False
+
+
+def find_dotenv(start: Optional[str] = None) -> Optional[str]:
+    """Locate `.env`, walking up from `start` (default: this package's parent).
+
+    Looked up by walking rather than hard-coded, so the tools work whether they
+    are run from the project root, from `tools/`, or from anywhere else.
+    """
+    here = os.path.abspath(start or os.path.dirname(os.path.abspath(__file__)))
+    for _ in range(6):
+        candidate = os.path.join(here, ENV_FILE)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    cwd_candidate = os.path.join(os.getcwd(), ENV_FILE)
+    return cwd_candidate if os.path.isfile(cwd_candidate) else None
+
+
+def load_dotenv(path: Optional[str] = None, override: bool = False) -> Dict[str, str]:
+    """Read `.env` into the environment. Returns the names it set.
+
+    A real environment variable WINS over the file unless `override` is set:
+    exporting a key for one command must be able to beat the file, which is how
+    you switch to a second account for a single run without editing anything.
+
+    Deliberately dependency-free — this is a dozen lines of parsing, and adding
+    `python-dotenv` for it would be a new install step for every user.
+    """
+    global _DOTENV_LOADED
+    path = path or find_dotenv()
+    if not path or not os.path.isfile(path):
+        _DOTENV_LOADED = True
+        return {}
+    applied: Dict[str, str] = {}
+    with open(path, encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.lower().startswith("export "):
+                line = line[7:].lstrip()
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # strip one matching pair of quotes, so a password with spaces or a
+            # trailing # is safe to write as "..."
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            else:
+                value = value.split(" #")[0].rstrip()
+            if not key:
+                continue
+            if override or not os.environ.get(key):
+                os.environ[key] = value
+                applied[key] = value
+    _DOTENV_LOADED = True
+    return applied
+
+
+def apply_secrets(cfg: "AppConfig") -> "AppConfig":
+    """Fill the credential fields from the environment (and from `.env`).
+
+    Secrets are NOT in the config files: every engine config is a tracked source
+    file, so a password written into one is committed and pushed. The config
+    dataclasses still have the fields — the live broker and the data client need
+    somewhere to read them from — they are just never populated from YAML.
+    """
+    load_dotenv()
+    if not cfg.databento.api_key:
+        cfg.databento.api_key = os.environ.get("DATABENTO_API_KEY")
+    if cfg.mt5.login in (None, 0, ""):
+        env_login = os.environ.get("MT5_LOGIN")
+        if env_login:
+            try:
+                cfg.mt5.login = int(env_login)
+            except ValueError:
+                raise ValueError(
+                    f"MT5_LOGIN must be the numeric account number "
+                    f"(got {env_login!r}). Check {ENV_FILE}.")
+    if not cfg.mt5.password:
+        cfg.mt5.password = os.environ.get("MT5_PASSWORD")
+    if not cfg.mt5.server:
+        cfg.mt5.server = os.environ.get("MT5_SERVER")
+    if not cfg.mt5.terminal_path:
+        cfg.mt5.terminal_path = os.environ.get("MT5_TERMINAL_PATH")
+    return cfg
+
+
+def missing_secrets(cfg: "AppConfig", live: bool = True) -> List[str]:
+    """Which credentials are still unset. Used by the live entry points to fail
+    with a list instead of a stack trace from deep inside the MT5 client."""
+    missing = []
+    if not cfg.databento.api_key:
+        missing.append("DATABENTO_API_KEY")
+    if live:
+        if cfg.mt5.login in (None, 0, ""):
+            missing.append("MT5_LOGIN")
+        if not cfg.mt5.password:
+            missing.append("MT5_PASSWORD")
+        if not cfg.mt5.server:
+            missing.append("MT5_SERVER")
+    return missing

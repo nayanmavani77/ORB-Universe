@@ -666,3 +666,93 @@ def test_the_shipped_config_actually_caps_the_session(base, bars):
     res = run_backtest(app, bars, RbeaLogger(level=0))
     taken = max(t.trade_no_in_session for t in res.trades)
     assert taken <= 3, f"the cap was not applied — {taken} trades in a session"
+
+
+# ==========================================================================
+# 8. credentials live in .env, never in a config file
+# ==========================================================================
+def test_no_engine_config_contains_a_credential_field():
+    """Engine configs are tracked in git. A key or password written into one is
+    committed and pushed, so the fields must not be there to fill in."""
+    import re as _re
+    import yaml
+    for module in BUILTIN:
+        path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)),
+                            "config.yaml")
+        raw = yaml.safe_load(open(path, encoding="utf-8").read()) or {}
+        assert not (raw.get("databento") or {}).get("api_key"), \
+            f"{module.NAME}/config.yaml carries a Databento key"
+        mt5 = raw.get("mt5") or {}
+        for field in ("login", "password", "server", "terminal_path"):
+            assert field not in mt5, \
+                f"{module.NAME}/config.yaml has mt5.{field} — it belongs in .env"
+
+
+def test_env_example_exists_and_is_a_template_only():
+    """The committed template must list every variable and hold no real value."""
+    path = os.path.join(ROOT, ".env.example")
+    assert os.path.exists(path), ".env.example is missing"
+    text = open(path, encoding="utf-8").read()
+    for var in ("DATABENTO_API_KEY", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER",
+                "MT5_TERMINAL_PATH"):
+        assert var in text, f".env.example does not mention {var}"
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        _key, _, value = line.partition("=")
+        assert value.strip() == "", \
+            f".env.example must stay empty, but has a value: {line}"
+
+
+def test_gitignore_hides_env_but_keeps_the_template():
+    text = open(os.path.join(ROOT, ".gitignore"), encoding="utf-8").read()
+    lines = [l.strip() for l in text.splitlines()]
+    assert ".env" in lines, ".gitignore does not ignore .env"
+    assert "!.env.example" in lines, ".gitignore also hides the template"
+
+
+def test_dotenv_parsing(tmp_path, monkeypatch):
+    """Quotes, an `export` prefix, comments and blank lines — the shapes a
+    hand-edited .env actually takes."""
+    from orb.config import load_dotenv
+    env = tmp_path / ".env"
+    env.write_text(
+        "# comment\n\n"
+        "DATABENTO_API_KEY=db-plain\n"
+        'MT5_PASSWORD="p@ss word#hash"\n'
+        "export MT5_SERVER=Broker-Live1\n"
+        "MT5_TERMINAL_PATH=C:/Program Files/MetaTrader 5/terminal64.exe\n"
+        "NOT_A_PAIR\n", encoding="utf-8")
+    for var in ("DATABENTO_API_KEY", "MT5_PASSWORD", "MT5_SERVER",
+                "MT5_TERMINAL_PATH"):
+        monkeypatch.delenv(var, raising=False)
+    applied = load_dotenv(str(env))
+    assert applied["DATABENTO_API_KEY"] == "db-plain"
+    assert applied["MT5_PASSWORD"] == "p@ss word#hash"   # quotes off, # kept
+    assert applied["MT5_SERVER"] == "Broker-Live1"       # `export ` stripped
+    assert applied["MT5_TERMINAL_PATH"].endswith("terminal64.exe")
+    assert "NOT_A_PAIR" not in applied
+
+
+def test_a_real_env_var_beats_the_file(tmp_path, monkeypatch):
+    """So one command can point at a second account without editing .env."""
+    from orb.config import load_dotenv
+    env = tmp_path / ".env"
+    env.write_text("MT5_LOGIN=11111111\n", encoding="utf-8")
+    monkeypatch.setenv("MT5_LOGIN", "99999999")
+    load_dotenv(str(env))
+    assert os.environ["MT5_LOGIN"] == "99999999"
+
+
+def test_missing_secrets_names_what_is_absent(monkeypatch):
+    from orb.config import missing_secrets
+    from orb.runconfig import RunConfig
+    for var in ("DATABENTO_API_KEY", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = RunConfig.load("orb").app
+    cfg.databento.api_key = None
+    cfg.mt5.login = cfg.mt5.password = cfg.mt5.server = None
+    assert missing_secrets(cfg, live=True) == [
+        "DATABENTO_API_KEY", "MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER"]
+    assert missing_secrets(cfg, live=False) == ["DATABENTO_API_KEY"]

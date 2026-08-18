@@ -314,7 +314,9 @@ symbol:
 # 6  DATA
 # ===========================================================================
 databento:
-  api_key: null                   # or set the DATABENTO_API_KEY env variable
+  # --- CREDENTIALS ---------------------------------------------------------
+  # The Databento API key is NOT in this file. It lives in `.env` at the
+  # project root, which is git-ignored. See .env.example.
   dataset: "GLBX.MDP3"
   symbols: "GC.FUT"
   stype_in: "parent"              # raw_symbol | continuous | parent | instrument_id
@@ -378,10 +380,20 @@ backtest:
 # ===========================================================================
 mt5:
   symbol: "GC"                    # the symbol name inside your MT5 terminal
-  login: null
-  password: null
-  server: null
-  terminal_path: null             # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
+
+  # --- CREDENTIALS ---------------------------------------------------------
+  # Your MT5 login, password and server are NOT in this file. They live in
+  # `.env` at the project root, which is git-ignored:
+  #
+  #     MT5_LOGIN=12345678
+  #     MT5_PASSWORD=your-password
+  #     MT5_SERVER=ICMarkets-Live12
+  #     MT5_TERMINAL_PATH=C:/Program Files/MetaTrader 5/terminal64.exe
+  #     DATABENTO_API_KEY=db-xxxxxxxx
+  #
+  # Copy `.env.example` to `.env` and fill it in. This config file is tracked
+  # in git — anything written here is committed and pushed.
+
   deviation_points: 20            # max slippage allowed on a market order
   dry_run: true                   # true = log the order, do NOT send it
 

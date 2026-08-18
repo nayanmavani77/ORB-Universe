@@ -6,6 +6,14 @@
 #  and results written outside the standard folders must still be ignored.
 # ===========================================================================
 
+# --- secrets --------------------------------------------------------------
+# Your Databento key and MT5 login live here. Never commit it.
+.env
+.env.local
+.env.*
+# ...but the TEMPLATE is committed, so people know what .env needs
+!.env.example
+
 # --- market data ----------------------------------------------------------
 # Large, slow to clone, and not ours to redistribute.
 data/*

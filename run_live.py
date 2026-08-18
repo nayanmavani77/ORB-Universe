@@ -11,7 +11,7 @@ import json
 import sys
 
 from orb.cli import apply_options, build_parser
-from orb.config import AppConfig
+from orb.config import AppConfig, ENV_FILE, missing_secrets
 from orb.live_trader import LiveTrader
 
 EPILOG = """
@@ -44,6 +44,14 @@ def main(argv=None) -> int:
     try:
         cfg = apply_options(AppConfig.load(a.config), a)
         cfg.validate_sessions()
+        missing = missing_secrets(cfg, live=True)
+        if missing:
+            print(f"Missing credential(s): {', '.join(missing)}\n"
+                  f"They belong in {ENV_FILE} at the project root — copy "
+                  f".env.example to {ENV_FILE} and fill it in.\n"
+                  f"They are deliberately not in the engine config, which is "
+                  f"tracked in git.", file=sys.stderr)
+            return 2
     except (ValueError, FileNotFoundError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2

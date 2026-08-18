@@ -76,7 +76,7 @@ sessions:
     # Switch this on and run `--engine orb,orb_reverse` to trade Asia with the
     # breakout while London fades, on one account. Each session keeps the
     # engine of the file it is written in, so nothing is restated.
-    enabled: true
+    enabled: false
     range_start: "19:00"          # Asia open
     range_end:   "19:30"
     stop_time:   "02:55"          # flat before London opens
@@ -86,18 +86,16 @@ sessions:
     #   sl_range_mult: 0.75
     #   direction: reverse
     #   max_trades_per_session: 2
-    signal_timeframe: "M1"
-    risk_reward: 2.0 
 
   london:
     enabled: false
     range_start: "03:00"          # London open
-    range_end:   "03:15"
-    stop_time:   "09:30"          # flat before New York opens
+    range_end:   "03:30"
+    stop_time:   "09:25"          # flat before New York opens
     magic: 20260802
 
   new_york:
-    enabled: false
+    enabled: true
     range_start: "09:30"          # New York open
     range_end:   "10:00"
     stop_time:   "16:55"          # flat before the 17:00 COMEX halt
@@ -119,14 +117,14 @@ sessions:
 defaults:
 
   # --- signal ---
-  signal_timeframe: "M1"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
+  signal_timeframe: "M5"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
                                   # the bar that must CLOSE beyond the range
 
   # --- risk ---
   sl_mode: mid_range              # InpSLMode: mid_range | full_range
                                   #   mid_range  — stop at the range midpoint
                                   #   full_range — stop at the opposite side
-  risk_reward: 2.0                # InpRR — target = this x the stop distance
+  risk_reward: 4.0                # InpRR — target = this x the stop distance
   lots: 1.0                       # InpLots
 
   # --- entries ---
@@ -136,7 +134,7 @@ defaults:
                                   #         the next breakout is taken
                                   # false — the very next candle closing
                                   #         outside the range opens a new trade
-  max_trades_per_session: 2       # InpMaxTradesPerSession (0 = unlimited)
+  max_trades_per_session: 0       # InpMaxTradesPerSession (0 = unlimited)
   close_at_stop_time: true        # InpCloseAtStopTime — flatten at stop_time.
                                   # Required when more than one session is on.
 
@@ -312,7 +310,9 @@ symbol:
 # 6  DATA
 # ===========================================================================
 databento:
-  api_key: null                   # or set the DATABENTO_API_KEY env variable
+  # --- CREDENTIALS ---------------------------------------------------------
+  # The Databento API key is NOT in this file. It lives in `.env` at the
+  # project root, which is git-ignored. See .env.example.
   dataset: "GLBX.MDP3"
   symbols: "GC.FUT"
   stype_in: "parent"              # raw_symbol | continuous | parent | instrument_id
@@ -376,10 +376,20 @@ backtest:
 # ===========================================================================
 mt5:
   symbol: "GC"                    # the symbol name inside your MT5 terminal
-  login: null
-  password: null
-  server: null
-  terminal_path: null             # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
+
+  # --- CREDENTIALS ---------------------------------------------------------
+  # Your MT5 login, password and server are NOT in this file. They live in
+  # `.env` at the project root, which is git-ignored:
+  #
+  #     MT5_LOGIN=12345678
+  #     MT5_PASSWORD=your-password
+  #     MT5_SERVER=ICMarkets-Live12
+  #     MT5_TERMINAL_PATH=C:/Program Files/MetaTrader 5/terminal64.exe
+  #     DATABENTO_API_KEY=db-xxxxxxxx
+  #
+  # Copy `.env.example` to `.env` and fill it in. This config file is tracked
+  # in git — anything written here is committed and pushed.
+
   deviation_points: 20            # max slippage allowed on a market order
   dry_run: true                   # true = log the order, do NOT send it
 
