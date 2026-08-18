@@ -363,7 +363,17 @@ class OrbStrategy:
         ok, pos, err = b.open_market(is_buy, lot, sl, self._order_comment(),
                                      magic=self.cfg.magic)
         if not ok:
-            self.log.error(f"{'BUY' if is_buy else 'SELL'} order rejected: {err}")
+            # A dry run declining to send is the configuration working, not a
+            # failure — logging it at ERROR made a correct `dry_run: true`
+            # session read like a broken one. Everything else IS an error.
+            # Behaviour is unchanged either way: the order did not open, so the
+            # breakout stays armed and the session counter does not move.
+            side = "BUY" if is_buy else "SELL"
+            if str(err).strip().lower() == "dry run":
+                self.log.info(f"{side} NOT sent — dry run. Still armed, so the "
+                              f"next qualifying close will log another.")
+            else:
+                self.log.error(f"{side} order rejected: {err}")
             return
 
         self.trades_this_session += 1

@@ -354,6 +354,7 @@ the cent. All 24 identical across the whole restructure.
 | `python tests/test_single_source.py` | 20 |
 | `python -m pytest tests/test_orb_reverse.py` | 28 |
 | `python -m pytest tests/test_multi_engine.py` | 45 |
+| `python -m pytest tests/test_live_feed.py` | 14 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

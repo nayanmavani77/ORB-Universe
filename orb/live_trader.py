@@ -123,6 +123,53 @@ class LiveTrader:
                           f"The live feed covers the rest.")
         return min(now, available)
 
+    # ------------------------------------------------------------------
+    def _front_month(self, path) -> Optional[str]:
+        """The most-traded outright contract in the warm-up history.
+
+        The live stream carries every contract under the parent symbol at once,
+        so the feed has to be told which one to follow. The answer is already
+        implicit in the history just downloaded: whichever outright carried the
+        most volume over the warm-up window is the front month right now, and
+        it is the same series `load_dbn_bars` built the warm-up bars from.
+        """
+        mode = str(getattr(self.cfg.databento, "contract_mode", "") or "").lower()
+        fixed = getattr(self.cfg.databento, "contract_symbol", None)
+        if mode == "symbol" and fixed:
+            return str(fixed).strip().upper()
+        if mode == "all":
+            self.log.warn(
+                "contract_mode is 'all', so the live feed is NOT locked to one "
+                "contract. Bars from every outright under "
+                f"{self.cfg.databento.symbols} will be interleaved as if they "
+                "were one instrument. This is almost certainly wrong for live "
+                "trading — use front_month_volume or a fixed --contract.")
+            return None
+        try:
+            from .data.dbn import list_contracts
+            table = list_contracts(path)          # spreads already excluded
+            if table is None or len(table) == 0:
+                return None
+            return str(table.index[0]).strip().upper()   # sorted by volume desc
+        except Exception as exc:
+            self.log.warn(f"Could not identify the front-month contract "
+                          f"({exc!r}). The live feed will accept any outright "
+                          f"under {self.cfg.databento.symbols}, which mixes "
+                          f"contracts — prefer a fixed --contract until this "
+                          f"is resolved.")
+            return None
+
+    def _lock_feed(self, contract, bars) -> None:
+        """Point the live feed at one contract, with a price to sanity-check.
+
+        Guarded with `getattr` because tests inject simple fake feeds that have
+        no such method, and a missing filter must not break the loop.
+        """
+        lock = getattr(self.feed, "lock_contract", None)
+        if not callable(lock):
+            return
+        lock(contract, bars[-1].close if bars else None)
+
     def warmup(self, days: int = 3) -> None:
         """Seed the bar history from Databento so the range for the current
         session can be rebuilt immediately after a restart."""
@@ -146,6 +193,7 @@ class LiveTrader:
             os.close(fd)
             data.to_file(tmp)
             from .data.dbn import load_dbn_bars
+            contract = self._front_month(tmp)
             bars = load_dbn_bars(tmp, self.clock)
             os.unlink(tmp)
             # replay warm-up bars into history only — no trading decisions
@@ -155,6 +203,7 @@ class LiveTrader:
             if bars:
                 self.log.info(f"Warm-up: loaded {len(bars)} historical bars up to "
                               f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
+            self._lock_feed(contract, bars)
         except (AttributeError, TypeError, NameError):
             # a wiring mistake in this module, not a bad network day - never
             # let it hide behind a warning that reads like a Databento outage
@@ -179,6 +228,7 @@ class LiveTrader:
                     os.close(fd)
                     data.to_file(tmp)
                     from .data.dbn import load_dbn_bars
+                    contract = self._front_month(tmp)
                     bars = load_dbn_bars(tmp, self.clock)
                     os.unlink(tmp)
                     for b in bars:
@@ -187,6 +237,7 @@ class LiveTrader:
                         self.log.info(
                             f"Warm-up: loaded {len(bars)} historical bars up to "
                             f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
+                    self._lock_feed(contract, bars)
                     return
                 except Exception as retry_exc:
                     exc = retry_exc
@@ -257,6 +308,12 @@ class LiveTrader:
                     self.engine.on_bar(bar, now=now_fn(bar))
         finally:
             self.feed.stop()
+            # what the feed filtered out — worth seeing, because a large
+            # "other contract" count next to zero accepted means the lock is
+            # on the wrong symbol and the EA has been sitting blind
+            report = getattr(self.feed, "filter_report", None)
+            if callable(report):
+                self.log.info(report())
             if hasattr(self.broker, "shutdown"):
                 self.broker.shutdown()
             self.log.info("Stopped: EA removed. Open positions are left untouched.")
