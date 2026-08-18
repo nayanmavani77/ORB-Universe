@@ -36,4 +36,4 @@ pytest>=7.0
 # Windows only. Left commented so `pip install -r` works on Linux and macOS,
 # where the package does not exist. Install it separately to trade live:
 #     pip install MetaTrader5
-# MetaTrader5>=5.0.45
+MetaTrader5>=5.0.45
