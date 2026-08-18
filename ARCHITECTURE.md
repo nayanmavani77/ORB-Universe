@@ -432,6 +432,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_live_feed.py` | 18 |
 | `python -m pytest tests/test_late_start.py` | 15 |
 | `python -m pytest tests/test_range_window.py` | 9 |
+| `python -m pytest tests/test_exit_journal.py` | 10 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

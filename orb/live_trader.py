@@ -13,7 +13,7 @@ lookup is per session, a live account can run several engines side by side.
 from __future__ import annotations
 
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .broker import MT5Broker
@@ -47,7 +47,12 @@ class LiveTrader:
         self.engine.after_tick = self._after_tick
         self.feed = feed or DatabentoLiveFeed(cfg.databento, self.clock, self.log)
         self._running = False
-        self._last_deal_check = datetime.now(timezone.utc)
+        #: throttle for the closed-deal poll; None means "poll now"
+        self._last_deal_check = None
+        #: deal tickets already journalled, so a wide window cannot repeat one
+        self._seen_deals: set = set()
+        #: the first poll only records what already existed
+        self._deals_primed = False
         #: the history the warm-up downloaded. Kept because it is the only
         #: record of what a session did before the EA was running — see
         #: `_replay_session`.
@@ -187,7 +192,12 @@ class LiveTrader:
                   if session_start <= b.time < session_end] if self._warmup_bars else []
         traded = [b for b in self._warmup_bars
                   if b.time >= session_end] if self._warmup_bars else []
-        if len(window) < 2 or not traded:
+        # ONE bar is a perfectly valid range window and must not be rejected:
+        # London's 03:00-03:15 on M15 is exactly one bar, as is any 1-minute
+        # window on M1. Requiring two silently returned None for precisely
+        # those configurations, so the count fell back to MT5 alone — which is
+        # blind to trades the EA would have taken while it was not running.
+        if not window or not traded:
             return None
         try:
             from .backtest import run_backtest        # local: see note above
@@ -317,14 +327,50 @@ class LiveTrader:
                           f"window has already closed will be SKIPPED for today.")
 
     # ------------------------------------------------------------------
+    #: how often the closed-deal poll actually queries MT5
+    DEAL_POLL_SECONDS = 5.0
+    #: how far either side of the broker's clock to look for closed deals.
+    #: Wide on purpose — see `_after_tick`.
+    DEAL_WINDOW_DAYS = 2
+
     def _after_tick(self, now: datetime) -> None:
-        """Journal positions that closed on the server (SL / TP / manual)."""
+        """Journal positions that closed on the server (SL / TP / manual).
+
+        This used to query a MOVING window, `[last_check, wall]`, built from
+        `datetime.now(timezone.utc)`. Two faults, and together they lost exits.
+
+        1. MT5 reports deal times in the BROKER's server time, not UTC. On a
+           server at UTC+3 the window was three hours in the past, so a deal
+           that had just happened fell outside it.
+        2. `last_check` advanced whether or not anything was found, so a deal
+           the window missed was missed FOREVER.
+
+        Seen live on 2026-08-18: a take-profit on ticket #4549601521 never
+        produced an EXIT line, while a stop-loss eight minutes later did. The
+        EA's trading was unaffected — `positions_count` reads positions
+        directly, and it correctly re-armed once flat — but the journal, which
+        is the only record of what the account did, silently lost a trade.
+
+        Now: a deliberately WIDE window anchored on the broker's own clock, and
+        de-duplication by deal ticket. Nothing is lost by being early or late,
+        and nothing is reported twice. The first poll only PRIMES the seen-set,
+        so deals from before the EA started are not announced as if they had
+        just happened.
+        """
         mt5 = getattr(self.broker, "mt5", None)
         if mt5 is None:                       # simulated broker: nothing to poll
             return
         wall = datetime.now(timezone.utc)
-        deals = mt5.history_deals_get(self._last_deal_check, wall) or []
+        if (self._last_deal_check is not None
+                and (wall - self._last_deal_check).total_seconds()
+                < self.DEAL_POLL_SECONDS):
+            return                            # throttle: the window is wide
         self._last_deal_check = wall
+
+        span = timedelta(days=self.DEAL_WINDOW_DAYS)
+        anchor = self.broker.server_time()
+        deals = mt5.history_deals_get(anchor - span, anchor + span) or []
+
         reasons = {
             getattr(mt5, "DEAL_REASON_SL", 4): "STOP LOSS hit",
             getattr(mt5, "DEAL_REASON_TP", 5): "TAKE PROFIT hit",
@@ -335,7 +381,16 @@ class LiveTrader:
             getattr(mt5, "DEAL_REASON_SO", 6): "STOP OUT",
         }
         owns = getattr(self.broker, "owns", None)
+        first_pass = not self._deals_primed
+        self._deals_primed = True
+
         for d in deals:
+            ticket = getattr(d, "ticket", None)
+            if ticket is None or ticket in self._seen_deals:
+                continue
+            self._seen_deals.add(ticket)
+            if first_pass:
+                continue                       # priming only: already history
             if owns is not None and not owns(d.magic):
                 continue
             if d.symbol != self.cfg.mt5.symbol:

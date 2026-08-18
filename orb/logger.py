@@ -38,8 +38,19 @@ class RbeaLogger:
         self.clock_time = None          # set by the engine so lines can be stamped
 
     # -- session guard ----------------------------------------------------
-    def reset_once_keys(self) -> None:
-        self._once_keys.clear()
+    def reset_once_keys(self, prefix: Optional[str] = None) -> None:
+        """Forget the once-per-session keys.
+
+        With `prefix`, only that owner's keys are cleared. Sessions share one
+        logger in a multi-engine run, so an unqualified clear let one session
+        starting a new day wipe another's suppression — and "Stop Time reached"
+        reappeared for a session whose state had not changed.
+        """
+        if prefix is None:
+            self._once_keys.clear()
+            return
+        for key in [k for k in self._once_keys if k.startswith(prefix)]:
+            self._once_keys.discard(key)
 
     def first_time_this_session(self, key: str) -> bool:
         if key in self._once_keys:

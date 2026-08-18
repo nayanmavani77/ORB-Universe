@@ -195,7 +195,7 @@ class OrbStrategy:
         self._await_reentry = False
         self._session_blocked = False
         self.closed_at_stop = False
-        self.log.reset_once_keys()
+        self.log.reset_once_keys(f"{self.cfg.name or 'MAIN'}:")
 
         self.log.info(
             "New session | range window {a} .. {b} | trading until {c}{d}".format(
@@ -257,12 +257,21 @@ class OrbStrategy:
         late = (now - self.session_end).total_seconds()
         if late > max(120.0, 2 * self.tf_seconds):
             self.log.warn_once(
-                "rangewait",
+                self._once("rangewait"),
                 f"Range for {fmt_dt(self.session_start)}.."
                 f"{fmt_time(self.session_end)} is still waiting for the "
                 f"window's last {self.cfg.signal_timeframe} bar, "
                 f"{late/60:.0f} min after the window closed. No bars are "
                 f"arriving — the session cannot trade until they do.")
+
+    def _once(self, key: str) -> str:
+        """Namespace a once-per-session key with this session's name.
+
+        Sessions share one logger in a multi-engine run, so unqualified keys
+        collided: one session starting a new day cleared everyone's, and a
+        message another session had already shown once reappeared.
+        """
+        return f"{self.cfg.name or 'MAIN'}:{key}"
 
     def _is_late_session(self) -> bool:
         """Did this session's range window close before the EA started?
@@ -508,7 +517,7 @@ class OrbStrategy:
     def _trading_allowed_now(self, now: datetime) -> bool:
         allowed, why = self._news_decision(now)
         if not allowed:
-            self.log.info_once("newsfilter",
+            self.log.info_once(self._once("newsfilter"),
                                f"Signal ignored: {fmt_date(now)} - {why}.")
             return False
         if self.broker.positions_count() > 0:
@@ -516,13 +525,13 @@ class OrbStrategy:
             return False
         if self._session_blocked:
             self.log.info_once(
-                "sessionblocked",
+                self._once("sessionblocked"),
                 "Signal ignored: this session had already used its trade "
                 "allowance before the EA started.")
             return False
         if 0 < self.cfg.max_trades_per_session <= self.trades_this_session:
             self.log.info_once(
-                "maxtrades",
+                self._once("maxtrades"),
                 f"Signal ignored: session limit of "
                 f"{self.cfg.max_trades_per_session} trade(s) already reached.")
             return False
@@ -702,7 +711,7 @@ class OrbStrategy:
         # 2. stop time reached -> optionally flatten, then wait for next session
         if self.stop_enabled and now >= self.trade_until:
             if self.range_computed:
-                self.log.info_once("windowclosed",
+                self.log.info_once(self._once("windowclosed"),
                                    "Stop Time reached - no further entries this session.")
             if self.cfg.close_at_stop_time and not self.closed_at_stop:
                 self.closed_at_stop = True

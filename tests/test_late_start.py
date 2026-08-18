@@ -236,6 +236,23 @@ def test_mt5_wins_when_it_is_the_larger():
     assert taken(live_run(WITNESSED, prior=2, warm=WARM_ONE)) == 0
 
 
+def test_a_single_bar_range_window_is_still_replayed():
+    """London's 03:00-03:15 on M15 is exactly ONE bar, as is any 1-minute
+    window on M1. The replay used to require two and silently returned None for
+    precisely those configurations, falling back to MT5 alone — which is blind
+    to trades the EA would have taken while it was not running."""
+    cfg = asia_config()
+    broker = HistoryBroker(cfg.symbol, 100000.0, prior=0)
+    trader = LiveTrader(cfg, broker=broker, feed=Feed([]),
+                        logger=RbeaLogger(level=0))
+    trader._warmup_bars = list(WARM_ONE)
+    session = next(s for s in cfg.enabled_sessions() if s.name == "asia")
+    start = BASE + timedelta(hours=19)
+    # a ONE-bar window: 19:00..19:01
+    got = trader._replay_session(start, start + timedelta(minutes=1), session)
+    assert got is not None, "a single-bar window was refused"
+
+
 def test_history_is_queried_with_this_sessions_magic_and_window():
     """Wrong magic or window would count another session's trades."""
     bars = [m1(23 * 60 + 38 + i, 4453) for i in range(3)]
