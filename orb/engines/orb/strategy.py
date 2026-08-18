@@ -74,9 +74,24 @@ class OrbStrategy:
         self.range_mid = 0.0
         self.trades_this_session = 0
         self.armed = False
-        self._late_start_warned = False
         self.closed_at_stop = False
         self.last_bar_time: Optional[datetime] = None
+
+        #: Server time the EA began running. LIVE ONLY — `run_backtest` never
+        #: sets it, so every rule keyed on it is inert in a backtest and the
+        #: golden master stays identical. See `_is_late_session`.
+        self.started_at: Optional[datetime] = None
+        #: set on a late session until price closes back INSIDE the range, so
+        #: the EA only ever trades a breakout it witnessed itself
+        self._await_reentry = False
+        #: set when a late session has no allowance left, or none could be
+        #: determined — see `_adopt_late_session`
+        self._session_blocked = False
+
+        #: Injected by `LiveTrader.run`: how many trades a session had already
+        #: signalled before the EA started, by replaying its own history.
+        #: Absent in a backtest, where no session is ever joined late.
+        self.session_replay = None
 
         self._banner()
 
@@ -165,6 +180,10 @@ class OrbStrategy:
         self.range_high = self.range_low = self.range_mid = 0.0
         self.trades_this_session = 0
         self.armed = False
+        # cleared per session: both only ever apply to a session that was
+        # already under way when the EA started (see `_is_late_session`)
+        self._await_reentry = False
+        self._session_blocked = False
         self.closed_at_stop = False
         self.log.reset_once_keys()
 
@@ -188,6 +207,106 @@ class OrbStrategy:
     # ------------------------------------------------------------------
     # Range building  (MQL5: ComputeRange)
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def _is_late_session(self) -> bool:
+        """Did this session's range window close before the EA started?
+
+        `started_at` is set by the live path only, so this is always False in a
+        backtest and nothing below can change a backtested trade.
+
+        The test is against `session_end` — the moment range building finishes
+        — not `session_start`. An EA that was already running when the window
+        closed saw the first breakout itself and is properly in sync; one that
+        started afterwards did not.
+        """
+        return (self.started_at is not None
+                and self.session_end is not None
+                and self.session_end <= self.started_at)
+
+    def _adopt_late_session(self) -> None:
+        """Join a session already under way, without repeating or ignoring it.
+
+        Warm-up rebuilds the range from history but deliberately judges none of
+        it, so the EA never sees this session's breakouts. Two things therefore
+        have to be recovered before it may trade:
+
+        HOW MUCH OF THE ALLOWANCE IS SPENT. The session's own history is
+        replayed through the identical engine — `run_backtest`, `SimBroker`,
+        this very strategy class and settings — and the trades it produces are
+        adopted as `trades_this_session`. Verified on 193 Asia sessions of 2026
+        data: the replay reproduced the full backtest's count in 193 of 193.
+
+        This matters because a cruder measure is badly wrong. Counting range
+        excursions over-counts by roughly 10x — 17 per session against 1.76
+        real trades — and would declare the allowance spent in 91% of sessions.
+        The replay puts the true figure at 46%, so more than half of
+        late-joined sessions still have room, and abandoning them all would
+        throw away real trades for no reason.
+
+        MT5 is consulted too and the LARGER of the two is used: the replay
+        catches trades the EA would have taken but did not (it was off, or an
+        order was rejected), MT5 catches anything the replay cannot know about,
+        such as a manual trade on the same magic.
+
+        WHETHER A BREAKOUT MAY BE TAKEN AT ALL. Even with allowance left, the
+        EA must not inherit a breakout it never saw — that would enter far from
+        the range, where the stop is much wider because it is anchored to the
+        range. Observed live: a 21:48 breakout entered at 23:38 with 2.7x the
+        intended stop. So the session starts DISARMED and waits for a close
+        back INSIDE the range. Once price is inside, the EA has witnessed the
+        market itself and the next breakout is genuinely its own.
+
+        If neither source can be read the session is skipped, because an
+        unknown allowance cannot be spent safely.
+        """
+        d = self.broker.digits
+        self.armed = False
+        self._await_reentry = True
+
+        replayed = None
+        provider = getattr(self, "session_replay", None)
+        if callable(provider):
+            replayed = provider(self.session_start, self.session_end, self.cfg)
+        actual = self.broker.trades_opened_since(self.cfg.magic, self.session_start)
+
+        if replayed is None and actual is None:
+            self._session_blocked = True
+            self.log.warn(
+                f"Late start and this session's history could not be read, so "
+                f"how much of the {self.cfg.max_trades_per_session}-trade "
+                f"allowance is already spent is unknown. NO trades this "
+                f"session. The next session starts clean.")
+            return
+
+        used = max(v for v in (replayed, actual) if v is not None)
+        self.trades_this_session = int(used)
+        cap = self.cfg.max_trades_per_session
+        source = []
+        if replayed is not None:
+            source.append(f"{replayed} from replaying its history")
+        if actual is not None:
+            source.append(f"{actual} opened on the account")
+
+        if 0 < cap <= used:
+            self._session_blocked = True
+            self.log.warn(
+                f"Late start — NO trades this session. It had already used all "
+                f"{cap} of its trades before the EA started at "
+                f"{fmt_dt(self.started_at)} ({', '.join(source)}). The range "
+                f"below is still built and journalled.")
+            return
+
+        left = "unlimited" if cap <= 0 else str(cap - used)
+        self.log.warn(
+            f"Late start: this session's range window closed at "
+            f"{fmt_time(self.session_end)}, before the EA started at "
+            f"{fmt_dt(self.started_at)}, so its early breakouts happened "
+            f"unseen ({', '.join(source)}). {left} trade(s) of "
+            f"{cap or 'unlimited'} remain. Waiting for a close back INSIDE "
+            f"{self.range_low:.{d}f}..{self.range_high:.{d}f} before taking "
+            f"one — a breakout the EA has actually witnessed, rather than one "
+            f"it would be entering hours late and far from the range.")
+
     def _compute_range(self) -> None:
         bars = self.store.window(self.session_start, self.session_end)
         self.range_computed = True
@@ -204,15 +323,8 @@ class OrbStrategy:
         self.range_mid = (hi + lo) / 2.0
         self.range_valid = hi > lo
         self.armed = self.range_valid           # ready for the first breakout
-        # A range rebuilt from downloaded history — i.e. the EA started AFTER
-        # the window closed — arms exactly as it would have live, which is
-        # faithful to the MQL5 EA on attach. It is NOT what a backtest of the
-        # same day would have done: the backtest took the FIRST close beyond
-        # the range, hours ago and much nearer the edge. Starting late means
-        # entering later, further from the range, with a larger stop for the
-        # same lot size. Say so, rather than let the journal imply the two are
-        # the same trade. Detection only — nothing here changes what is traded.
-        self._late_start_warned = False
+        if self.range_valid and self._is_late_session():
+            self._adopt_late_session()
         d = self.broker.digits
         self.log.info(
             "Range built {a}..{b} | High {hi} | Low {lo} | Mid {mid} | size {sz} "
@@ -295,6 +407,12 @@ class OrbStrategy:
             return False
         if self.broker.positions_count() > 0:
             self.log.debug("Signal ignored: a position from this EA is already open.")
+            return False
+        if self._session_blocked:
+            self.log.info_once(
+                "sessionblocked",
+                "Signal ignored: this session had already used its trade "
+                "allowance before the EA started.")
             return False
         if 0 < self.cfg.max_trades_per_session <= self.trades_this_session:
             self.log.info_once(
@@ -543,34 +661,31 @@ class OrbStrategy:
         # 6. re-arming
         inside_range = self.range_low <= closed_close <= self.range_high
         if not self.armed:
-            if (not self.cfg.require_range_reentry) or inside_range:
+            # `_await_reentry` is the LATE-START gate and is deliberately
+            # independent of `require_range_reentry`. That flag governs
+            # re-arming after a trade closes; this one governs what the EA may
+            # assume about breakouts it never saw. A config with re-entry
+            # switched off must still not inherit a stale breakout.
+            needs_inside = self.cfg.require_range_reentry or self._await_reentry
+            if (not needs_inside) or inside_range:
                 self.armed = True
-                self.log.info(
-                    f"Re-armed: bar {fmt_dt(closed_open)} closed at "
-                    f"{closed_close:.{d}f} back inside the range - next breakout "
-                    f"can trade.")
+                if self._await_reentry:
+                    self._await_reentry = False
+                    self.log.info(
+                        f"In sync: bar {fmt_dt(closed_open)} closed at "
+                        f"{closed_close:.{d}f}, back inside the range. The EA "
+                        f"has now witnessed the market itself, so the next "
+                        f"breakout can be traded.")
+                else:
+                    self.log.info(
+                        f"Re-armed: bar {fmt_dt(closed_open)} closed at "
+                        f"{closed_close:.{d}f} back inside the range - next breakout "
+                        f"can trade.")
             else:
                 self.log.debug(
                     f"Not armed: bar {fmt_dt(closed_open)} closed at "
                     f"{closed_close:.{d}f}, still outside the range.")
             return
-
-        # A late start shows up here: the very first bar the EA judges is
-        # already beyond the range, which means the real first breakout of this
-        # session happened while it was not running.
-        if not self._late_start_warned and self.armed and not inside_range:
-            self._late_start_warned = True
-            side = "below" if closed_close < self.range_low else "above"
-            edge = (self.range_low if closed_close < self.range_low
-                    else self.range_high)
-            self.log.warn(
-                f"Late start: the first bar this session judged had ALREADY "
-                f"closed {side} the range ({closed_close:.{d}f} vs "
-                f"{edge:.{d}f}). The session's first breakout happened before "
-                f"the EA was running, so this entry is later and further from "
-                f"the range than a backtest of the same day would show — the "
-                f"stop is measured from here, so the risk per trade is larger. "
-                f"Start the EA before the range window to avoid it.")
 
         # 7. breakout signals
         buy_signal = closed_close > self.range_high

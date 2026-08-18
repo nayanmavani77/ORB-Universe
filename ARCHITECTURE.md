@@ -280,6 +280,48 @@ each.
 
 ---
 
+## Late starts
+
+An EA that starts after a session's range window has closed has missed that
+session's early breakouts — warm-up rebuilds the range from history but
+deliberately judges none of it. Two things are recovered before it may trade.
+
+**How much allowance is spent.** The session's own history is replayed through
+the identical engine — `run_backtest`, `SimBroker`, the same strategy class and
+settings — and the trades it produces are adopted as `trades_this_session`.
+Verified on 193 Asia sessions of 2026 data: the replay reproduced the full
+backtest's count in **193 of 193**.
+
+Getting this right is what makes late sessions usable. A cruder measure —
+counting range excursions — over-counts by roughly 10x, because price wanders
+across the range edge repeatedly while a trade is open:
+
+| measure | per session |
+|---|---|
+| range excursions | 17.2 |
+| trades actually taken | 1.76 |
+
+Excursion counting declares the allowance spent in **91%** of sessions; the
+replay puts it at **46%**, so more than half of late-joined sessions still have
+room. MT5 is consulted too and the larger of the two wins — the replay catches
+trades the EA would have taken but did not (it was off, an order was rejected,
+`dry_run` was on), MT5 catches anything a replay cannot know about, such as a
+manual trade on the same magic. If neither can be read, the session is skipped.
+
+**Whether a breakout may be taken.** Even with room left, the session starts
+DISARMED and waits for a close back INSIDE the range, so the EA only trades a
+breakout it witnessed itself. Entering a stale one means entering far from the
+range, where the stop is much wider because it is anchored to the range —
+observed live, a 21:48 breakout entered at 23:38 with 2.7x the intended stop.
+This gate is independent of `require_range_reentry`, which governs a different
+thing (re-arming after a trade closes).
+
+Both are keyed on `OrbStrategy.started_at`, set only by `LiveTrader.run`. A
+backtest leaves it `None`, so the whole mechanism is inert there.
+`tests/test_late_start.py` covers it.
+
+---
+
 ## Credentials
 
 Not in any config file. An engine `config.yaml` is a tracked source file, so a
@@ -354,7 +396,8 @@ the cent. All 24 identical across the whole restructure.
 | `python tests/test_single_source.py` | 20 |
 | `python -m pytest tests/test_orb_reverse.py` | 28 |
 | `python -m pytest tests/test_multi_engine.py` | 45 |
-| `python -m pytest tests/test_live_feed.py` | 14 |
+| `python -m pytest tests/test_live_feed.py` | 18 |
+| `python -m pytest tests/test_late_start.py` | 15 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from .bars import Bar
@@ -129,6 +129,23 @@ class Broker(ABC):
         exists for.
         """
         return self.price_for(is_buy)
+
+    def trades_opened_since(self, magic: int, since: datetime):
+        """How many positions this magic opened since `since`. None = unknown.
+
+        Exists so a restart cannot reset `max_trades_per_session`. The counter
+        lives in memory, so a process that restarts mid-session used to begin
+        again at zero — restart three times on a 2-trade cap and you get six
+        trades. Only the broker knows what actually happened, so only the
+        broker can answer.
+
+        `None` means "could not determine", which is NOT the same as zero: the
+        caller blocks the session rather than risk exceeding the cap.
+
+        The default is 0 — correct for any broker that cannot restart
+        mid-session, which is every simulated one.
+        """
+        return 0
 
     # A price LEVEL from the feed cannot be sent to a broker quoting a
     # different instrument: GC and XAUUSD track each other but sit tens of
@@ -466,6 +483,33 @@ class MT5Broker(Broker):
             return datetime.fromtimestamp(tick.time, tz=timezone.utc).replace(
                 tzinfo=None)
         return datetime.now(timezone.utc).replace(tzinfo=None)
+
+    def trades_opened_since(self, magic: int, since: datetime):
+        """Count position OPENINGS with this magic since `since`.
+
+        Counts entry deals rather than closed positions, so a trade that is
+        still open counts too — it is one of the session's allowance either
+        way. Returns None if MT5 will not answer, which the strategy treats as
+        "assume the cap may be spent" rather than "assume none were taken".
+        """
+        try:
+            # MT5 wants naive local-ish datetimes here, the same shape
+            # `server_time` returns, and an `until` safely in the future so a
+            # deal recorded a moment ago is not missed.
+            until = self.server_time() + timedelta(days=1)
+            deals = self.mt5.history_deals_get(since, until)
+            if deals is None:
+                return None
+            entry_in = getattr(self.mt5, "DEAL_ENTRY_IN", 0)
+            return sum(
+                1 for d in deals
+                if int(getattr(d, "magic", -1)) == int(magic)
+                and int(getattr(d, "entry", entry_in)) == int(entry_in)
+                and str(getattr(d, "symbol", "")) == str(self.symbol))
+        except Exception as exc:
+            if self.log:
+                self.log.warn(f"Could not read MT5 trade history ({exc!r}).")
+            return None
 
     # -- interface --------------------------------------------------------
     def ask(self) -> float:

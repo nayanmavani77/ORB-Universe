@@ -827,7 +827,7 @@ python tests/test_data_layer.py       #  22 checks — spreads, contracts, rolls
 python tests/test_cli.py              #  32 checks — CLI covers every setting
 
 python -m pytest tests/test_multi_engine.py tests/test_orb_reverse.py \
-                tests/test_live_feed.py -q
+                tests/test_live_feed.py tests/test_late_start.py -q
 ```
 
 `golden_master.py check` is the one to run after ANY change to the engines: it
