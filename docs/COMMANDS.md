@@ -169,7 +169,8 @@ python tools\mt5_check.py --deals
 python tools\golden_master.py check      # 24 backtests, trade for trade
 python -m pytest tests\test_multi_engine.py tests\test_orb_reverse.py ^
     tests\test_live_feed.py tests\test_late_start.py ^
-    tests\test_range_window.py tests\test_exit_journal.py -q
+    tests\test_range_window.py tests\test_exit_journal.py ^
+    tests\test_bar_timing.py -q
 python tests\test_parity.py
 python tests\test_sessions.py
 python tests\test_cli.py

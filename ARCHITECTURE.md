@@ -280,6 +280,33 @@ each.
 
 ---
 
+## Acting on a closed bar, live
+
+`Resampler.push` closes a bucket when a bar belonging to the NEXT bucket
+arrives — the analogue of MT5's `iTime` changing, and correct in a backtest
+where the next bar is always available immediately.
+
+Live it costs a full bar. Databento emits a 1-minute bar the moment it
+completes, so the EA HAS the finished 09:34 bar at 09:35:00 — but the resampler
+held it until the 09:35 bar turned up at 09:36:00, while the backtest fills at
+the open of the bar after the signal (09:35:00). Live was one minute behind its
+own backtest on every trade, entering that much further past the range.
+
+`Engine.close_due_bar` closes the forming bar once the clock passes its end
+plus `IDLE_CLOSE_GRACE_SECONDS` for delivery. Measured on the live loop:
+
+| | acted |
+|---|---|
+| wait for the next bar | 03:04:05 |
+| close on the clock | **03:03:10** |
+
+for a bar that finished at 03:03:00 — about 55 seconds recovered. The decision
+is unchanged; only the waiting is removed. `run_backtest` never calls
+`on_idle`, so this cannot reach a backtest, and a bar the clock closed is not
+closed again if a late base bar re-opens its bucket.
+
+---
+
 ## The coverage gap
 
 Two data sources feed a live run, and neither covers the seam between them:
@@ -433,6 +460,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_late_start.py` | 15 |
 | `python -m pytest tests/test_range_window.py` | 9 |
 | `python -m pytest tests/test_exit_journal.py` | 10 |
+| `python -m pytest tests/test_bar_timing.py` | 7 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

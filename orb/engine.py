@@ -15,7 +15,7 @@ passed in as an argument rather than being decided inside.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from .bars import Bar, BarStore, Resampler
@@ -42,6 +42,10 @@ class Engine:
         self.log = logger or RbeaLogger()
         self.store = store if store is not None else BarStore()
         self.resampler = Resampler(timeframe_seconds(cfg.signal_timeframe))
+        #: LIVE ONLY. Open time of the last bar closed by the clock rather than
+        #: by the next bar's arrival — see `close_due_bar`. Stays None in a
+        #: backtest, which never idles.
+        self._last_clock_closed: Optional[datetime] = None
         # Which strategy this session runs is a per-session lookup, not a name
         # fixed in this file. That is what lets two sessions run two different
         # engines in one process; before, a second engine could only be reached
@@ -69,13 +73,58 @@ class Engine:
         call this — `on_bar` is the entry point for a single session.
         """
         closed_tf = self.resampler.push(bar)
+        if (closed_tf is not None and self._last_clock_closed is not None
+                and closed_tf.time <= self._last_clock_closed):
+            # `close_due_bar` already emitted this bucket; a late base bar
+            # re-opened it. Dropping the repeat keeps one bar = one decision.
+            closed_tf = None
         self._tick(now, closed_tf)
         return closed_tf
 
+    #: LIVE ONLY. Seconds after a bar's interval ends before the engine will
+    #: close it on the clock rather than wait for the next bar. Databento emits
+    #: a 1-minute bar the moment it completes, so a few seconds covers
+    #: delivery; long enough that the bucket's final base bar has certainly
+    #: arrived, short enough that almost the whole wasted minute is recovered.
+    IDLE_CLOSE_GRACE_SECONDS = 10
+
+    def close_due_bar(self, now: datetime) -> Optional[Bar]:
+        """Close the forming bar once the clock has passed its end. LIVE ONLY.
+
+        `Resampler.push` closes a bucket when a bar belonging to the NEXT
+        bucket arrives — the exact analogue of MT5's `iTime` changing, and
+        correct in a backtest, where the next bar is always available
+        immediately.
+
+        Live it costs a full bar. Databento emits the 09:34 bar at 09:35:00, so
+        the EA HAS the completed bar then — but the resampler holds it until
+        the 09:35 bar turns up at 09:36:00. The backtest fills at the open of
+        the bar after the signal (09:35:00); live filled a minute later, every
+        single trade. Seen on 2026-08-18: breakout on the 09:34 bar, order sent
+        at 09:36.
+
+        Nothing about the decision changes — the same completed bar runs
+        through the same `_tick`. Only the waiting is removed, and only where
+        the wait was an artefact of the feed rather than of the strategy.
+        `run_backtest` never calls `on_idle`, so this cannot reach a backtest.
+        """
+        cur = self.resampler.current
+        if cur is None:
+            return None
+        due = (cur.time + timedelta(seconds=self.resampler.tf_seconds)
+               + timedelta(seconds=self.IDLE_CLOSE_GRACE_SECONDS))
+        if now < due:
+            return None
+        closed = self.resampler.flush()
+        if closed is not None:
+            self._last_clock_closed = closed.time
+        return closed
+
     def on_idle(self, now: datetime) -> None:
         """No bar this poll — the EA still needs its per-tick housekeeping
-        (session rollover, range build, stop time)."""
-        self._tick(now, None)
+        (session rollover, range build, stop time), and may also have a bar
+        whose interval has elapsed but whose successor has not arrived."""
+        self._tick(now, self.close_due_bar(now))
 
     def warmup_bar(self, bar: Bar) -> Optional[Bar]:
         """Seed history from a PAST bar without taking any decision.
