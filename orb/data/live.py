@@ -85,16 +85,20 @@ class DatabentoLiveFeed:
         self._contract: Optional[str] = None
         #: the last close accepted as real, for the sanity band
         self._reference: Optional[float] = None
+        #: timestamp of the last bar handed on, so the series can only move
+        #: forward — see the out-of-order guard in `_to_bar`
+        self._last_ts: Optional[datetime] = None
         #: counters so the journal can report what was filtered, once, rather
         #: than a line per dropped record
         self._dropped = {"spread": 0, "other_contract": 0, "unidentified": 0,
-                         "bad_price": 0, "out_of_band": 0}
+                         "bad_price": 0, "out_of_band": 0, "out_of_order": 0}
         self._warned_unidentified = False
         self._accepted = 0
 
     # ------------------------------------------------------------------
     def lock_contract(self, symbol: Optional[str],
-                      reference_price: Optional[float] = None) -> None:
+                      reference_price: Optional[float] = None,
+                      last_time: Optional[datetime] = None) -> None:
         """Accept bars from this contract and no other.
 
         Called by `LiveTrader.warmup` with the front month the history loader
@@ -105,6 +109,10 @@ class DatabentoLiveFeed:
         self._contract = str(symbol).strip().upper() if symbol else None
         if reference_price:
             self._reference = float(reference_price)
+        if last_time is not None:
+            # the warm-up already covered up to here, so a live record at or
+            # before it is a repeat of history, not new information
+            self._last_ts = last_time
         if self.log and self._contract:
             self.log.info(f"Live feed locked to contract {self._contract} — "
                           f"bars from any other instrument under "
@@ -239,10 +247,30 @@ class DatabentoLiveFeed:
                        f"{symbol} at {c:,.3f} vs {self._reference:,.3f}")
             return None
 
+        # --- the series may only move forward ---------------------------
+        # `Resampler.push` treats ANY change of bucket as "a new bar", including
+        # a bucket in the past: a stale record closes the bar being built and
+        # rewinds to the older bucket. Verified — feeding 03:05 after 03:15 into
+        # an M15 resampler closes the 03:15 bar early and sets the current
+        # bucket back to 03:00.
+        #
+        # The backtest cannot hit this: `load_dbn_bars` sorts, and de-duplicates
+        # on (timestamp, symbol). A live stream offers no such guarantee — a
+        # reconnect, a snapshot replay, or the seam between the warm-up and the
+        # first live record can all deliver one. So it is enforced here, where
+        # it cannot affect the backtest path.
+        server_time = self.clock.to_server(ts)
+        if self._last_ts is not None and server_time <= self._last_ts:
+            self._drop("out_of_order",
+                       f"{symbol} at {server_time:%Y-%m-%d %H:%M}, not after "
+                       f"{self._last_ts:%Y-%m-%d %H:%M}")
+            return None
+
         self._accepted += 1
         self._reference = c
+        self._last_ts = server_time
         self.last_price = c
-        return Bar(self.clock.to_server(ts), o, h, l, c,
+        return Bar(server_time, o, h, l, c,
                    float(getattr(record, "volume", 0) or 0))
 
     # ------------------------------------------------------------------

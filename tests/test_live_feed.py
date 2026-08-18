@@ -17,9 +17,8 @@ Every test here replays that shape.
 from __future__ import annotations
 
 import os
-import queue
 import sys
-import threading
+import types
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,25 +58,24 @@ class Cfg:
 
 
 def make_feed(log=None):
-    """A feed with the constructor's state but no databento import."""
-    f = DatabentoLiveFeed.__new__(DatabentoLiveFeed)
-    f._db = None
-    f.cfg = Cfg()
-    f.clock = ServerClock(utc_offset_hours=0)
-    f.log = log
-    f._queue = queue.Queue()
-    f._client = None
-    f._thread = None
-    f._stop = threading.Event()
-    f.last_price = None
-    f._symbols = {}
-    f._contract = None
-    f._reference = None
-    f._dropped = {"spread": 0, "other_contract": 0, "unidentified": 0,
-                  "bad_price": 0, "out_of_band": 0}
-    f._warned_unidentified = False
-    f._accepted = 0
-    return f
+    """A real feed, built by the real constructor.
+
+    An earlier version of this helper hand-assembled the instance attributes.
+    That is the drift trap this whole file exists to catch: the constructor grew
+    a field, the double did not, and every test failed with AttributeError
+    instead of testing anything. `databento` is stubbed only so the import at
+    the top of `__init__` succeeds — nothing else about it is used.
+    """
+    stub = types.ModuleType("databento")
+    stub.Live = object
+    injected = "databento" not in sys.modules
+    if injected:
+        sys.modules["databento"] = stub
+    try:
+        return DatabentoLiveFeed(Cfg(), ServerClock(utc_offset_hours=0), log)
+    finally:
+        if injected:
+            del sys.modules["databento"]
 
 
 def seeded():
@@ -151,27 +149,29 @@ def test_unidentified_is_reported_once_and_loudly():
 def test_out_of_band_price_is_rejected():
     """Last backstop: a price nowhere near the last accepted one."""
     f = seeded()
-    f._to_bar(Bar(1, 4452.9))                        # sets the reference
+    f._to_bar(Bar(1, 4452.9, ts=TS))                 # sets the reference
     far = 4452.9 * (1 + SANITY_BAND * 2)
-    assert f._to_bar(Bar(1, far)) is None
+    assert f._to_bar(Bar(1, far, ts=TS + 60 * 1_000_000_000)) is None
     assert f._dropped["out_of_band"] == 1
 
 
 def test_a_violent_but_real_move_is_not_rejected():
     """The band must never reject a genuine day. 10% is a historic move."""
     f = seeded()
-    f._to_bar(Bar(1, 4452.9))
-    assert f._to_bar(Bar(1, 4452.9 * 1.10)) is not None
-    assert f._to_bar(Bar(1, 4452.9 * 0.90 * 1.10)) is not None
+    minute = 60 * 1_000_000_000
+    f._to_bar(Bar(1, 4452.9, ts=TS))
+    assert f._to_bar(Bar(1, 4452.9 * 1.10, ts=TS + minute)) is not None
+    assert f._to_bar(Bar(1, 4452.9 * 1.10 * 0.90, ts=TS + 2 * minute)) is not None
 
 
 def test_reference_tracks_forward_so_a_trend_is_not_clipped():
     """Walking 5% at a time must stay accepted however far price travels."""
     f = seeded()
-    price = 4452.9
+    price, ts = 4452.9, TS
     for _ in range(20):
         price *= 1.05
-        assert f._to_bar(Bar(1, price)) is not None, f"clipped at {price:,.0f}"
+        ts += 60 * 1_000_000_000
+        assert f._to_bar(Bar(1, price, ts=ts)) is not None, f"clipped at {price:,.0f}"
     assert price > 4452.9 * 2.5, "the walk did not actually go far"
 
 
@@ -196,6 +196,46 @@ def test_lock_contract_is_case_and_space_insensitive():
     f._to_bar(Mapping(1, "GCZ5"))
     f.lock_contract("  gcz5 ")
     assert f._to_bar(Bar(1, 4452.9)) is not None
+
+
+def test_stale_bar_is_dropped():
+    """`Resampler.push` treats an older bucket as a NEW bar and rewinds — a
+    stale 03:05 arriving after 03:15 closes the M15 bar early. The backtest
+    cannot hit it (sorted, de-duplicated); a live stream can."""
+    f = seeded()
+    later = TS + 60 * 1_000_000_000
+    assert f._to_bar(Bar(1, 4452.9, ts=later)) is not None
+    assert f._to_bar(Bar(1, 4453.0, ts=TS)) is None, "a stale bar got through"
+    assert f._dropped["out_of_order"] == 1
+
+
+def test_repeat_of_the_same_timestamp_is_dropped():
+    """Equal is not 'after'. The warm-up/live seam delivers exactly this."""
+    f = seeded()
+    assert f._to_bar(Bar(1, 4452.9)) is not None
+    assert f._to_bar(Bar(1, 4452.9)) is None
+    assert f._dropped["out_of_order"] == 1
+
+
+def test_warmup_boundary_is_honoured():
+    """lock_contract carries the warm-up's last bar time, so live records that
+    merely repeat history are ignored."""
+    f = make_feed()
+    f._to_bar(Mapping(1, "GCZ5"))
+    from datetime import datetime as _dt, timezone as _tz
+    boundary = _dt.fromtimestamp(TS / 1e9, tz=_tz.utc).replace(tzinfo=None)
+    f.lock_contract("GCZ5", 4466.0, last_time=boundary)
+    assert f._to_bar(Bar(1, 4452.9, ts=TS)) is None, "history was re-ingested"
+    assert f._to_bar(Bar(1, 4452.9, ts=TS + 60 * 1_000_000_000)) is not None
+
+
+def test_forward_series_is_never_blocked():
+    f = seeded()
+    ts = TS
+    for _ in range(10):
+        ts += 60 * 1_000_000_000
+        assert f._to_bar(Bar(1, 4452.9, ts=ts)) is not None
+    assert f._dropped["out_of_order"] == 0
 
 
 def test_filter_report_names_what_was_dropped():

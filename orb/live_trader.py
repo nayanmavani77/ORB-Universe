@@ -168,7 +168,30 @@ class LiveTrader:
         lock = getattr(self.feed, "lock_contract", None)
         if not callable(lock):
             return
-        lock(contract, bars[-1].close if bars else None)
+        last = bars[-1] if bars else None
+        try:
+            lock(contract,
+                 last.close if last else None,
+                 last_time=last.time if last else None)
+        except TypeError:
+            # a feed from an older signature, or a test double
+            lock(contract, last.close if last else None)
+
+        # The historical API lags the live feed, so the minutes between where
+        # history stops and where the subscription starts belong to neither.
+        # Small and unavoidable, but the operator should see it rather than
+        # wonder later why a bar is missing from a range.
+        if last is not None:
+            gap = (self.clock.to_server(datetime.now(timezone.utc))
+                   - last.time).total_seconds() / 60.0
+            if gap > 1.5:
+                self.log.warn(
+                    f"Coverage gap: history ends {last.time:%H:%M} server "
+                    f"time, the live feed starts now — about {gap:,.0f} minute"
+                    f"{'s' if gap >= 2 else ''} of bars belong to neither and "
+                    f"are lost. Harmless once a range is already built; if a "
+                    f"range window falls inside the gap it will be built from "
+                    f"fewer bars than usual.")
 
     def warmup(self, days: int = 3) -> None:
         """Seed the bar history from Databento so the range for the current
