@@ -125,7 +125,7 @@ defaults:
                                   #   mid_range  — stop at the range midpoint
                                   #   full_range — stop at the opposite side
   risk_reward: 2.0                # InpRR — target = this x the stop distance
-  lots: 1.0                       # InpLots
+  lots: 0.1                       # InpLots
 
   # --- entries ---
   require_range_reentry: true     # InpRequireRangeReentry
