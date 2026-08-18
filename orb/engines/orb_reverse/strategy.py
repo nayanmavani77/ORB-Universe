@@ -85,6 +85,15 @@ class OrbReverseStrategy(OrbStrategy):
         return ((self.range_high - distance) if is_buy
                 else (self.range_low + distance))
 
+    def _stop_loss_label(self) -> str:
+        """This engine ignores `sl_mode`; the stop is a multiple of the range.
+        Journal text only — `_stop_price` below is what actually places it."""
+        if not self.reverse:
+            return super()._stop_loss_label() + " (forward)"
+        if self.sl_anchor == ANCHOR_MIRROR:
+            return "mirrored range distance"
+        return f"{self.sl_range_mult:g} x range"
+
     def _stop_price(self, is_buy: bool) -> float:
         if not self.reverse:
             return self._range_stop_level(is_buy)

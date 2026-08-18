@@ -55,6 +55,74 @@ class LiveTrader:
         return self.engine.strategy
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_available_end(text: str):
+        """Pull the available end timestamp out of a Databento 422 message.
+
+        The API says, in prose: *"The dataset GLBX.MDP3 has data available up
+        to '2026-08-18 02:30:00+00:00'"*. That sentence is the only place the
+        boundary appears, so it is worth reading rather than guessing again.
+        """
+        import re
+        m = re.search(r"available up to '([^']+)'", str(text))
+        if not m:
+            return None
+        try:
+            stamp = datetime.fromisoformat(m.group(1))
+        except ValueError:
+            return None
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+    def _history_end(self, client, cfg) -> datetime:
+        """The latest timestamp the HISTORICAL API will actually serve.
+
+        Historical data lags the live feed — GLBX.MDP3 is typically minutes to
+        hours behind. Asking for `end = now` is therefore a request for data
+        that does not exist yet, and the API rejects the WHOLE query with a 422
+        rather than returning what it has. That killed the warm-up outright:
+
+            data_end_after_available_end — The dataset GLBX.MDP3 has data
+            available up to '2026-08-18 02:30:00+00:00'. The `end` in the
+            query ('2026-08-18 02:32:39') is after the available range.
+
+        and the EA then started with no history, so any session whose range
+        window had already closed was skipped for the day. Ask the metadata
+        endpoint where the data actually ends and clamp to it.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            rng = client.metadata.get_dataset_range(dataset=cfg.dataset)
+        except Exception as exc:                      # metadata down, or offline
+            self.log.warn(f"Could not read the dataset's available range "
+                          f"({exc!r}) - requesting history up to now and "
+                          f"letting the retry below handle a rejection.")
+            return now
+        # the field has been spelled several ways across client versions
+        raw = None
+        if isinstance(rng, dict):
+            for key in ("end", "available_end", "end_date"):
+                if rng.get(key):
+                    raw = rng[key]
+                    break
+        else:
+            raw = getattr(rng, "end", None) or getattr(rng, "available_end", None)
+        if raw is None:
+            return now
+        try:
+            available = (raw if isinstance(raw, datetime)
+                         else datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+        except ValueError:
+            return now
+        if available.tzinfo is None:
+            available = available.replace(tzinfo=timezone.utc)
+        if available < now:
+            behind = (now - available).total_seconds() / 60.0
+            self.log.info(f"Historical data ends {available:%Y-%m-%d %H:%M} UTC, "
+                          f"{behind:,.0f} min behind now - warming up to there. "
+                          f"The live feed covers the rest.")
+        return min(now, available)
+
     def warmup(self, days: int = 3) -> None:
         """Seed the bar history from Databento so the range for the current
         session can be rebuilt immediately after a restart."""
@@ -68,7 +136,7 @@ class LiveTrader:
         cfg = self.cfg.databento
         try:
             client = db.Historical(cfg.api_key)
-            end = datetime.now(timezone.utc)
+            end = self._history_end(client, cfg)
             start = datetime.fromtimestamp(end.timestamp() - days * 86400,
                                            tz=timezone.utc)
             data = client.timeseries.get_range(
@@ -92,8 +160,39 @@ class LiveTrader:
             # let it hide behind a warning that reads like a Databento outage
             raise
         except Exception as exc:
+            # One retry, using the boundary the rejection itself names. This
+            # catches the case where the metadata endpoint disagreed with the
+            # timeseries endpoint, or was unreachable above.
+            capped = self._parse_available_end(exc)
+            if capped is not None:
+                self.log.warn(f"History warm-up rejected: data ends "
+                              f"{capped:%Y-%m-%d %H:%M} UTC. Retrying up to "
+                              f"there.")
+                try:
+                    start = datetime.fromtimestamp(
+                        capped.timestamp() - days * 86400, tz=timezone.utc)
+                    data = client.timeseries.get_range(
+                        dataset=cfg.dataset, symbols=cfg.symbols,
+                        schema=cfg.schema, stype_in=cfg.stype_in,
+                        start=start, end=capped)
+                    fd, tmp = tempfile.mkstemp(suffix=".dbn.zst")
+                    os.close(fd)
+                    data.to_file(tmp)
+                    from .data.dbn import load_dbn_bars
+                    bars = load_dbn_bars(tmp, self.clock)
+                    os.unlink(tmp)
+                    for b in bars:
+                        self.engine.warmup_bar(b)
+                    if bars:
+                        self.log.info(
+                            f"Warm-up: loaded {len(bars)} historical bars up to "
+                            f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
+                    return
+                except Exception as retry_exc:
+                    exc = retry_exc
             self.log.warn(f"History warm-up failed ({exc!r}) - the EA will build "
-                          f"the range from live bars only.")
+                          f"the range from live bars only. A session whose range "
+                          f"window has already closed will be SKIPPED for today.")
 
     # ------------------------------------------------------------------
     def _after_tick(self, now: datetime) -> None:

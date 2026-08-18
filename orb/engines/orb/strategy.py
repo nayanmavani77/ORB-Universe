@@ -82,6 +82,18 @@ class OrbStrategy:
     # ------------------------------------------------------------------
     # OnInit banner
     # ------------------------------------------------------------------
+    def _stop_loss_label(self) -> str:
+        """How the stop is described in the startup banner.
+
+        Overridable, because it is a claim about what this engine will actually
+        do. The banner used to hard-code the two `sl_mode` values, so a session
+        running `orb_reverse` announced "SL mid range" while its stop was in
+        fact 0.75 x the range measured from the fill — `sl_mode` is not even
+        read by that engine. On a live account that line is the operator's
+        confirmation that the config took effect, so it has to be true.
+        """
+        return "full range" if self.cfg.sl_mode == SL_FULL_RANGE else "mid range"
+
     def _banner(self) -> None:
         if self.active_buckets:
             self.log.info("News categories:")
@@ -116,7 +128,7 @@ class OrbStrategy:
                 a=self.cfg.range_start, b=self.cfg.range_end,
                 s=(self.cfg.stop_time if self.stop_enabled else "0 (continuous)"),
                 tf=self.cfg.signal_timeframe,
-                sl=("full range" if self.cfg.sl_mode == SL_FULL_RANGE else "mid range"),
+                sl=self._stop_loss_label(),
                 rr=self.cfg.risk_reward, lots=self.cfg.lots,
                 mx=(self.cfg.max_trades_per_session
                     if self.cfg.max_trades_per_session > 0 else "unlimited")))
@@ -416,7 +428,11 @@ class OrbStrategy:
             "| TP {tp} reward {rw} | R:R 1:{rr:.2f} | trade {n} of session".format(
                 dir=("BUY " if is_buy else "SELL"), tk=pos.ticket, lot=lot,
                 e=f"{entry:.{d}f}", sl=f"{sl:.{d}f}",
-                mode=("full range" if self.cfg.sl_mode == SL_FULL_RANGE else "mid range"),
+                # same overridable label as the startup banner — a fill line
+                # reading "[mid range]" on a stop that is 0.75 x the range is
+                # the one place a live operator would notice a wrong config,
+                # so it must describe what this engine actually did
+                mode=self._stop_loss_label(),
                 rk=f"{risk:.{d}f}", tp=f"{tp:.{d}f}",
                 rw=f"{abs(tp - entry):.{d}f}" if tp else f"{0.0:.{d}f}",
                 rr=self.cfg.risk_reward, n=self.trades_this_session))
