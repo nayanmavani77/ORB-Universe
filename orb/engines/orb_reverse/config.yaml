@@ -104,7 +104,7 @@ sessions:
     range_end:   "10:04"
     stop_time:   "16:55"
     magic: 20260903
-    max_trades_per_session: 2
+    max_trades_per_session: 10
     engine_options:
       sl_range_mult: 0.5
       direction: reverse
