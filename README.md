@@ -829,7 +829,7 @@ python tests/test_cli.py              #  32 checks — CLI covers every setting
 python -m pytest tests/test_multi_engine.py tests/test_orb_reverse.py \
                 tests/test_live_feed.py tests/test_late_start.py \
                 tests/test_range_window.py tests/test_exit_journal.py \
-                tests/test_bar_timing.py -q
+                tests/test_bar_timing.py tests/test_journal.py -q
 ```
 
 `golden_master.py check` is the one to run after ANY change to the engines: it

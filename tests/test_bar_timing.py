@@ -205,7 +205,7 @@ def test_the_range_is_built_without_waiting_for_the_next_bar():
     """Same saving applies to the range: the window's last bar closes on the
     clock, so a session opens on time instead of a bar later."""
     events, _ = live_run(grace=10)
-    when, _ = first(events, "Range built")
+    when, _ = first(events, "RANGE BUILT")
     assert when is not None, "the range was never built"
     # the window's last bar (03:00) is delivered at 03:01:00
     lag = (when - (BASE + timedelta(minutes=181))).total_seconds()

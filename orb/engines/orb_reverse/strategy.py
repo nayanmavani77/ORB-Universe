@@ -116,9 +116,8 @@ class OrbReverseStrategy(OrbStrategy):
         """The inherited banner, then the reversal settings — so the journal
         says what actually ran instead of the `sl_mode` this engine ignores."""
         super()._banner()
-        self.log.info("=" * 62)
-        self.log.info("REVERSAL ENGINE")
-        self.log.info(f"   {self.settings.describe()}")
-        self.log.info("   NOTE          sl_mode is ignored by this engine; "
-                      "sl_range_mult replaces it")
-        self.log.info("=" * 62)
+        self.log.banner(
+            f"REVERSE ENGINE — {self.cfg.name or 'MAIN'}",
+            [self.settings.describe(),
+             "a close ABOVE the range SELLS, a close BELOW it BUYS",
+             "sl_mode is ignored here; sl_range_mult replaces it"])

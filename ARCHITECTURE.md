@@ -280,6 +280,39 @@ each.
 
 ---
 
+## The journal
+
+```
+---- 2026-08-18 ------------------------------------------------------
+03:01:00  INFO  london    | RANGE BUILT     03:00..03:01 from 1 bar(s)  high 4452.00  low 4448.00
+03:03:00  INFO  london    | BREAKOUT UP     bar 03:02 closed 4460.00   above the range 4452.00
+03:03:00  INFO  london    | SELL FILLED     #1  1.00 lots @ 4458.00   trade 1 of this session
+03:03:00  INFO  london    |   SL 4461.00 (0.75 x range)  risk 3.00   TP 4452.00  reward 6.00  R:R 1:2.00
+03:03:00  INFO  london    |   TP SET          #1 take profit accepted by the broker
+03:05:00  INFO  london    | EXIT           #1  TAKE PROFIT hit @ 4452.00   +600.00 USD (profit)
+```
+
+**Every strategy line carries its session.** Bound once in `Engine.__init__`
+via `RbeaLogger.for_session`, not at the 78 call sites — so a line added later
+cannot forget. With several engines interleaved, an untagged "Stop Time
+reached" is unreadable: you cannot tell whose it is. A session logger shares
+its parent's file handle, stream, once-keys and duplicate guard; only the name
+and the clock are its own.
+
+**The take profit reports itself.** It is a SECOND broker call, made after the
+fill because it can only be computed from the real fill price. Its success used
+to be a DEBUG line, so a normal journal showed a TP in the fill summary with
+nothing to say whether the broker had accepted it — on a live account, the
+difference between intending a TP and having one.
+
+**Seconds, and the date as a banner.** The EA now acts within about a second of
+a bar closing; minute resolution hid exactly that. Lines written before the
+engine has a clock are padded to the same width, so the columns never wander.
+
+`tests/test_journal.py` pins all of it.
+
+---
+
 ## Acting on a closed bar, live
 
 `Resampler.push` closes a bucket when a bar belonging to the NEXT bucket
@@ -474,6 +507,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_range_window.py` | 9 |
 | `python -m pytest tests/test_exit_journal.py` | 10 |
 | `python -m pytest tests/test_bar_timing.py` | 10 |
+| `python -m pytest tests/test_journal.py` | 12 |
 
 The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
 plus London on `orb_reverse`, in one backtest, produces exactly the trades each

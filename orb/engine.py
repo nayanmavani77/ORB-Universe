@@ -39,7 +39,14 @@ class Engine:
                  strategy_cls: Optional[type] = None):
         self.cfg = cfg
         self.broker = broker
-        self.log = logger or RbeaLogger()
+        # Every line this session writes is tagged with its name. Bound once,
+        # here, rather than at 78 call sites — so a line added later cannot
+        # forget to say which session it belongs to. With several engines
+        # interleaved in one journal, an untagged "Stop Time reached" is
+        # unreadable: you cannot tell whose it is.
+        base = logger or RbeaLogger()
+        bind = getattr(base, "for_session", None)
+        self.log = bind(cfg.name or "MAIN") if callable(bind) else base
         self.store = store if store is not None else BarStore()
         self.resampler = Resampler(timeframe_seconds(cfg.signal_timeframe))
         #: LIVE ONLY. Open time of the last bar closed early rather than by the
@@ -265,7 +272,9 @@ class MultiEngine:
         self.engines = []
         for cfg in sessions:
             label = cfg.name or "MAIN"
-            self.log.info(f"--- session {label} [{cfg.engine}] ---")
+            self.log.info(f"--- session {label} [{cfg.engine}] "
+                          f"{cfg.range_start}-{cfg.range_end} -> "
+                          f"{cfg.stop_time} | magic {cfg.magic} ---")
             self.engines.append(Engine(cfg, broker, logger=self.log))
         names = ", ".join(f"{e.cfg.name or 'MAIN'} ({e.cfg.engine})"
                           for e in self.engines)

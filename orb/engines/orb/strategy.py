@@ -198,7 +198,7 @@ class OrbStrategy:
         self.log.reset_once_keys(f"{self.cfg.name or 'MAIN'}:")
 
         self.log.info(
-            "New session | range window {a} .. {b} | trading until {c}{d}".format(
+            "SESSION OPEN    range {a} .. {b}   entries until {c}{d}".format(
                 a=fmt_dt(self.session_start), b=fmt_time(self.session_end),
                 c=fmt_dt(self.trade_until),
                 d=("" if self.stop_enabled else " (no stop time - runs to next range)")))
@@ -442,11 +442,15 @@ class OrbStrategy:
             self._adopt_late_session()
         d = self.broker.digits
         self.log.info(
-            "Range built {a}..{b} | High {hi} | Low {lo} | Mid {mid} | size {sz} "
-            "| {n} bars".format(
+            "RANGE BUILT     {a}..{b} from {n} bar(s)   "
+            "high {hi}  low {lo}  mid {mid}  size {sz}".format(
                 a=fmt_dt(self.session_start), b=fmt_time(self.session_end),
                 hi=f"{hi:.{d}f}", lo=f"{lo:.{d}f}", mid=f"{self.range_mid:.{d}f}",
                 sz=f"{hi - lo:.{d}f}", n=len(bars)))
+        self.log.info(
+            "                 armed — waiting for a {tf} bar to close beyond "
+            "{lo} / {hi}".format(tf=self.cfg.signal_timeframe,
+                                 lo=f"{lo:.{d}f}", hi=f"{hi:.{d}f}"))
         if self.on_range_built:
             self.on_range_built(self)
 
@@ -651,44 +655,58 @@ class OrbStrategy:
         if translate:
             basis = getattr(b, "basis", None)
             self.log.info(
-                "Levels carried across instruments | signal {sp} -> fill {e} "
-                "(basis {bs}) | SL distance {rk} | TP distance {rw}".format(
+                "  cross-instrument  signal {sp} -> fill {e} (basis {bs}); the "
+                "SL/TP DISTANCES carry across, not the levels".format(
                     sp=f"{signal_price:.{d}f}", e=f"{entry:.{d}f}",
-                    bs=f"{(basis(is_buy) if callable(basis) else exec_price - signal_price):+.{d}f}",
-                    rk=f"{real_risk:.{d}f}",
-                    rw=f"{self.cfg.risk_reward * real_risk:.{d}f}"))
+                    bs=f"{(basis(is_buy) if callable(basis) else exec_price - signal_price):+.{d}f}"))
+
+        # The order went out with the SL attached; the TP can only be worked
+        # out from the REAL fill, so it is a second call to the broker. That
+        # second call used to be invisible at normal level — a debug line — so
+        # a journal showed a TP in the fill summary with nothing to say whether
+        # the broker had actually accepted it. On a live account the difference
+        # between "we intended a TP" and "the TP is on the server" is the
+        # whole trade, so it is reported either way now.
+        self._log_fill(is_buy, pos, lot, entry, real_sl, real_risk, real_tp)
 
         if min_dist > 0.0 and abs(real_tp - entry) < min_dist:
             self.log.warn(
-                f"TP NOT set on #{pos.ticket}: target {abs(real_tp - entry):.{d}f} "
-                f"from entry is inside the broker stop level {min_dist:.{d}f}. "
-                f"Position runs with SL only.")
-            self._log_fill(is_buy, pos, lot, entry, real_sl, real_risk, 0.0)
+                f"  TP NOT SET      target is {abs(real_tp - entry):.{d}f} from "
+                f"entry, inside the broker's minimum distance {min_dist:.{d}f}. "
+                f"#{pos.ticket} runs on its STOP LOSS ONLY.")
             return
 
         ok, err = b.modify(pos, real_sl, real_tp)
-        if not ok:
-            self.log.error(f"Failed to set TP on #{pos.ticket}: {err}")
+        if ok:
+            self.log.info(
+                f"  TP SET          #{pos.ticket} take profit {real_tp:.{d}f} "
+                f"accepted by the broker (SL {real_sl:.{d}f} unchanged)")
         else:
-            self.log.debug(f"TP applied to #{pos.ticket}.")
-
-        self._log_fill(is_buy, pos, lot, entry, real_sl, real_risk, real_tp)
+            self.log.error(
+                f"  TP REJECTED     #{pos.ticket} take profit {real_tp:.{d}f} was "
+                f"NOT accepted: {err}. The position is running on its STOP LOSS "
+                f"ONLY — set the TP by hand or close it.")
 
     def _log_fill(self, is_buy, pos, lot, entry, sl, risk, tp) -> None:
         d = self.broker.digits
         self.log.info(
-            "{dir} FILLED #{tk} | {lot:.2f} lots @ {e} | SL {sl} [{mode}] risk {rk} "
-            "| TP {tp} reward {rw} | R:R 1:{rr:.2f} | trade {n} of session".format(
+            "{dir} FILLED     #{tk}  {lot:.2f} lots @ {e}   trade {n} of this "
+            "session".format(
                 dir=("BUY " if is_buy else "SELL"), tk=pos.ticket, lot=lot,
-                e=f"{entry:.{d}f}", sl=f"{sl:.{d}f}",
+                e=f"{entry:.{d}f}", n=self.trades_this_session))
+        self.log.info(
+            "  SL {sl} ({mode})   risk {rk}      "
+            "TP {tp}   reward {rw}   R:R 1:{rr:.2f}".format(
+                sl=f"{sl:.{d}f}",
                 # same overridable label as the startup banner — a fill line
                 # reading "[mid range]" on a stop that is 0.75 x the range is
                 # the one place a live operator would notice a wrong config,
                 # so it must describe what this engine actually did
                 mode=self._stop_loss_label(),
-                rk=f"{risk:.{d}f}", tp=f"{tp:.{d}f}",
-                rw=f"{abs(tp - entry):.{d}f}" if tp else f"{0.0:.{d}f}",
-                rr=self.cfg.risk_reward, n=self.trades_this_session))
+                rk=f"{risk:.{d}f}",
+                tp=(f"{tp:.{d}f}" if tp else "none"),
+                rw=(f"{abs(tp - entry):.{d}f}" if tp else "-"),
+                rr=self.cfg.risk_reward))
 
     # ==================================================================
     # Main loop  (MQL5: OnTick)
@@ -712,7 +730,8 @@ class OrbStrategy:
         if self.stop_enabled and now >= self.trade_until:
             if self.range_computed:
                 self.log.info_once(self._once("windowclosed"),
-                                   "Stop Time reached - no further entries this session.")
+                                   "SESSION CLOSED  stop time reached — no further "
+                                   "entries. Any open position keeps its SL and TP.")
             if self.cfg.close_at_stop_time and not self.closed_at_stop:
                 self.closed_at_stop = True
                 if self.broker.positions_count() > 0:
@@ -803,9 +822,9 @@ class OrbStrategy:
                         f"breakout can be traded.")
                 else:
                     self.log.info(
-                        f"Re-armed: bar {fmt_dt(closed_open)} closed at "
-                        f"{closed_close:.{d}f} back inside the range - next breakout "
-                        f"can trade.")
+                        f"RE-ARMED        bar {fmt_dt(closed_open)} closed "
+                        f"{closed_close:.{d}f}, back inside the range — the next "
+                        f"breakout can trade")
             else:
                 self.log.debug(
                     f"Not armed: bar {fmt_dt(closed_open)} closed at "
@@ -821,10 +840,11 @@ class OrbStrategy:
             return
 
         self.log.info(
-            "BREAKOUT {dirn} | bar {t} closed at {c} vs Range {side} {lvl}".format(
+            "BREAKOUT {dirn:<4}   bar {t} closed {c}   {side} the range "
+            "{lvl}".format(
                 dirn=("UP" if buy_signal else "DOWN"),
                 t=fmt_dt(closed_open), c=f"{closed_close:.{d}f}",
-                side=("High" if buy_signal else "Low"),
+                side=("above" if buy_signal else "below"),
                 lvl=f"{(self.range_high if buy_signal else self.range_low):.{d}f}"))
 
         if not self._trading_allowed_now(now):
@@ -837,4 +857,7 @@ class OrbStrategy:
                     net: float, currency: str) -> None:
         """MQL5 OnTradeTransaction() journal line."""
         d = self.broker.digits
-        self.log.info(f"EXIT #{ticket} | {how} @ {price:.{d}f} | net {net:.2f} {currency}")
+        verdict = "profit" if net > 0 else ("loss" if net < 0 else "flat")
+        self.log.info(
+            f"EXIT           #{ticket}  {how} @ {price:.{d}f}   "
+            f"{net:+.2f} {currency} ({verdict})")
