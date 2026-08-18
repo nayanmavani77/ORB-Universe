@@ -15,11 +15,18 @@ documentation entry.
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass, fields as dc_fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Sequence, Tuple
 
 from .config import AppConfig, NEWS_CATEGORIES
+
+#: the default configuration — the orb engine's own master config. There is no
+#: parent config file any more; each engine's config.yaml is the complete
+#: configuration for that engine.
+ENGINE_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "engines", "orb", "config.yaml")
 
 
 # ==========================================================================
@@ -50,6 +57,10 @@ G_NEWS = "News categories"
 
 SPEC: List[Opt] = [
     # ---------------- session ----------------
+    Opt(("--engine",), "strategy.engine", "str",
+        "Which strategy engine this session runs — a name registered in "
+        "orb/engines/, e.g. orb or orb_reverse. Each session may use a "
+        "different one; they run side by side.", G_SESSION, metavar="NAME"),
     Opt(("--range-start",), "strategy.range_start", "str",
         "Range window start, HH:MM.", G_SESSION, metavar="HH:MM"),
     Opt(("--range-end",), "strategy.range_end", "str",
@@ -239,7 +250,13 @@ GROUP_ORDER = [G_SESSION, G_STRAT, G_NEWS, G_SYMBOL, G_DATA, G_COST, G_OUT, G_LI
 #                      --set sessions.<name>.<field>=<value>
 #   strategy.name      per-session identity, set by the session's key in YAML
 #   strategy.enabled   per-session ON/OFF, driven by --sessions
-NO_FLAG = {"sessions", "strategy.name", "strategy.enabled"}
+#   strategy.engine_options
+#                      a mapping whose keys belong to whichever engine the
+#                      session runs, so there is no fixed set of flags to
+#                      generate. Driven by
+#                      --set sessions.<name>.engine_options.<option>=<value>
+NO_FLAG = {"sessions", "strategy.name", "strategy.enabled",
+           "strategy.engine_options"}
 
 
 def config_paths(cls=AppConfig, prefix: str = "") -> List[str]:
@@ -286,7 +303,7 @@ def build_parser(prog: str, description: str, epilog: str = "",
     p = argparse.ArgumentParser(
         prog=prog, description=description, epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--config", "-c", default="config.yaml", help="config file")
+    p.add_argument("--config", "-c", default=ENGINE_CONFIG, help="config file")
 
     groups = {}
     for opt in SPEC:

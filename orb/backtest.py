@@ -1,6 +1,6 @@
 """Backtest engine.
 
-Drives `RangeBreakoutStrategy` over historical base bars in exactly the order
+Drives `OrbStrategy` over historical base bars in exactly the order
 the EA would see them live:
 
     for each base bar:
@@ -20,7 +20,7 @@ from typing import List, Optional, Sequence
 
 from .bars import Bar
 from .broker import ClosedTrade, SimBroker
-from .config import AppConfig
+from .config import AppConfig, journal_settings
 from .engine import Engine, MultiEngine  # noqa: F401
 from .logger import RbeaLogger, parse_log_level
 from .timeutils import ServerClock
@@ -48,11 +48,9 @@ def run_backtest(cfg: AppConfig, bars: Sequence[Bar],
     if not bars:
         raise ValueError("No bars to backtest.")
 
-    log = logger or RbeaLogger(
-        level=parse_log_level(cfg.strategy.log_level),
-        file_path=cfg.strategy.log_file,
-        show_time=cfg.strategy.log_show_time,
-    )
+    _level, _file, _show_time = journal_settings(cfg)
+    log = logger or RbeaLogger(level=_level, file_path=_file,
+                               show_time=_show_time)
 
     bt = cfg.backtest
     broker = SimBroker(
@@ -72,9 +70,11 @@ def run_backtest(cfg: AppConfig, bars: Sequence[Bar],
 
     # journal line for every exit, same wording as OnTradeTransaction()
     def _on_exit(trade: ClosedTrade) -> None:
-        engine.strategy.report_exit(trade.ticket, trade.exit_reason,
-                                    trade.exit_price, trade.net_profit,
-                                    cfg.symbol.currency)
+        # routed by session, so a trade is journalled by the strategy that
+        # opened it — with several engines running, "the first one" is wrong
+        engine.strategy_for(trade.session_name).report_exit(
+            trade.ticket, trade.exit_reason, trade.exit_price,
+            trade.net_profit, cfg.symbol.currency)
     broker.on_exit = _on_exit
 
     log.info(f"Backtest range: {bars[0].time:%Y.%m.%d %H:%M} .. "

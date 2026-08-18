@@ -55,6 +55,12 @@ from orb.data.dbn import load_dbn_bars                       # noqa: E402
 from orb.logger import RbeaLogger, parse_log_level           # noqa: E402
 from orb.report import compute_stats, write_report           # noqa: E402
 
+#: the default configuration — the orb engine's own
+#: master config. There is no parent config file any more.
+ENGINE_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "orb", "engines", "orb", "config.yaml")
+
 # --------------------------------------------------------------------------
 TIMEFRAMES = ["M1", "M5", "M15"]
 ORB_MINUTES = [15, 30, 60]
@@ -151,7 +157,7 @@ def build_configs(base: AppConfig, news_dates: str, rr_values):
 # --------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(description="Run the 54-configuration ORB matrix")
-    p.add_argument("--config", "-c", default="config.yaml")
+    p.add_argument("--config", "-c", default=ENGINE_CONFIG)
     p.add_argument("--data", "-d", nargs="+", default=None,
                    help="bar data (overrides the config)")
     p.add_argument("--start", default="2026-01-01")

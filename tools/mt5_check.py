@@ -32,6 +32,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from orb.config import AppConfig                              # noqa: E402
 
+#: the default configuration — the orb engine's own
+#: master config. There is no parent config file any more.
+ENGINE_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "orb", "engines", "orb", "config.yaml")
+
 PASS, FAIL, WARN = [], [], []
 
 
@@ -325,7 +331,7 @@ examples:
   python tools/mt5_check.py --symbol XAUUSD
   python tools/mt5_check.py --place-trade            # demo account only
 """)
-    p.add_argument("--config", "-c", default="config.yaml")
+    p.add_argument("--config", "-c", default=ENGINE_CONFIG)
     p.add_argument("--symbol", default=None,
                    help="override mt5.symbol for this check")
     p.add_argument("--lots", type=float, default=None,

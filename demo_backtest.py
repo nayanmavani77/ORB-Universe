@@ -18,6 +18,12 @@ from orb.bars import Bar
 from orb.config import AppConfig
 from orb.report import print_summary, write_report
 
+#: the default configuration — the orb engine's own
+#: master config. There is no parent config file any more.
+ENGINE_CONFIG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "orb", "engines", "orb", "config.yaml")
+
 
 def synth_bars(days: int, seed: int = 7, start=datetime(2024, 1, 1),
                price: float = 4700.0) -> list:
@@ -52,7 +58,7 @@ def synth_bars(days: int, seed: int = 7, start=datetime(2024, 1, 1),
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--days", type=int, default=180)
-    p.add_argument("--config", default="config.yaml")
+    p.add_argument("--config", default=ENGINE_CONFIG)
     p.add_argument("--seed", type=int, default=7)
     a = p.parse_args()
 

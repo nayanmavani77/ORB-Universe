@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .broker import MT5Broker
-from .config import AppConfig
+from .config import AppConfig, journal_settings
 from .data.live import DatabentoLiveFeed
 from .engine import Engine, MultiEngine  # noqa: F401
 from .logger import RbeaLogger, parse_log_level
@@ -26,11 +26,9 @@ class LiveTrader:
     def __init__(self, cfg: AppConfig, logger: Optional[RbeaLogger] = None,
                  broker=None, feed=None, clock: Optional[ServerClock] = None):
         self.cfg = cfg
-        self.log = logger or RbeaLogger(
-            level=parse_log_level(cfg.strategy.log_level),
-            file_path=cfg.strategy.log_file,
-            show_time=cfg.strategy.log_show_time,
-        )
+        _level, _file, _show_time = journal_settings(cfg)
+        self.log = logger or RbeaLogger(level=_level, file_path=_file,
+                                        show_time=_show_time)
         self.clock = clock or ServerClock(
             utc_offset_hours=cfg.server_utc_offset_hours,
             timezone_name=cfg.server_timezone)

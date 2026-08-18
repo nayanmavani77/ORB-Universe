@@ -73,6 +73,7 @@ starts. A run can never quietly use settings you did not intend.
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--engine` | `orb` | Which strategy engine this session runs — a name registered in orb/engines/, e.g. orb or orb_reverse. Each session may use a different one; they run side by side. |
 | `--range-start` | `09:00` | Range window start, HH:MM. |
 | `--range-end` | `10:00` | Range window end, HH:MM. |
 | `--stop-time` | `17:00` | Stop trading at HH:MM. "0" disables it and the session runs until the next range starts. |

@@ -1,0 +1,55 @@
+{
+  "reversal_config": "reversal_config.yaml",
+  "base_config": "config.yaml",
+  "period": [
+    "2026-01-01",
+    "2026-08-13"
+  ],
+  "bars": 218252,
+  "configurations": 3240,
+  "axes": {
+    "sessions": [
+      "LONDON"
+    ],
+    "timeframes": [
+      "M1",
+      "M5",
+      "M15"
+    ],
+    "orb_minutes": [
+      15,
+      30,
+      60
+    ],
+    "news": [
+      "include",
+      "skip"
+    ],
+    "risk_reward": [
+      1,
+      1.5,
+      2,
+      2.5,
+      3
+    ],
+    "sl_range_mult": [
+      0.25,
+      0.5,
+      0.75,
+      1,
+      1.5,
+      2
+    ],
+    "max_trades": [
+      1,
+      2,
+      3
+    ],
+    "directions": [
+      "reverse",
+      "forward"
+    ]
+  },
+  "anchor": "range",
+  "engine": "orb.backtest.run_backtest (unmodified) with orb_reversal.ReversalStrategy substituted"
+}

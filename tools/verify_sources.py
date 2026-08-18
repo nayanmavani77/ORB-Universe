@@ -46,6 +46,12 @@ from orb.config import AppConfig                             # noqa: E402
 from orb.data.dbn import load_dbn_bars                       # noqa: E402
 from orb.logger import RbeaLogger                            # noqa: E402
 
+#: the default configuration — the orb engine's own
+#: master config. There is no parent config file any more.
+ENGINE_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "orb", "engines", "orb", "config.yaml")
+
 # (name, strategy overrides, databento overrides, data clamps)
 CASES = [
     ("default config",              {}, {}, {}),
@@ -68,7 +74,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Compare two data sources")
     p.add_argument("--a", required=True, help="source A (file, glob or directory)")
     p.add_argument("--b", required=True, help="source B")
-    p.add_argument("--config", "-c", default="config.yaml")
+    p.add_argument("--config", "-c", default=ENGINE_CONFIG)
     p.add_argument("--contract", default=None,
                    help="contract for the fixed-contract case, e.g. GCZ5")
     a = p.parse_args()

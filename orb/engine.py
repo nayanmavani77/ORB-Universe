@@ -22,7 +22,7 @@ from .bars import Bar, BarStore, Resampler
 from .broker import Broker
 from .config import StrategyConfig
 from .logger import RbeaLogger
-from .strategy import RangeBreakoutStrategy
+from .registry import resolve as resolve_engine
 from .timeutils import timeframe_seconds
 
 
@@ -35,14 +35,19 @@ class Engine:
 
     def __init__(self, cfg: StrategyConfig, broker: Broker,
                  logger: Optional[RbeaLogger] = None,
-                 store: Optional[BarStore] = None):
+                 store: Optional[BarStore] = None,
+                 strategy_cls: Optional[type] = None):
         self.cfg = cfg
         self.broker = broker
         self.log = logger or RbeaLogger()
         self.store = store if store is not None else BarStore()
         self.resampler = Resampler(timeframe_seconds(cfg.signal_timeframe))
-        self.strategy = RangeBreakoutStrategy(cfg, broker, store=self.store,
-                                              logger=self.log)
+        # Which strategy this session runs is a per-session lookup, not a name
+        # fixed in this file. That is what lets two sessions run two different
+        # engines in one process; before, a second engine could only be reached
+        # by rebinding a module global, which applied to every session at once.
+        cls = strategy_cls or resolve_engine(cfg.engine)
+        self.strategy = cls(cfg, broker, store=self.store, logger=self.log)
         # optional hook called once per tick, after the EA's own housekeeping
         # (live mode uses it to journal server-side exits)
         self.after_tick = None
@@ -160,10 +165,15 @@ class MultiEngine:
         self.engines = []
         for cfg in sessions:
             label = cfg.name or "MAIN"
-            self.log.info(f"--- session {label} ---")
+            self.log.info(f"--- session {label} [{cfg.engine}] ---")
             self.engines.append(Engine(cfg, broker, logger=self.log))
-        names = ", ".join(e.cfg.name or "MAIN" for e in self.engines)
+        names = ", ".join(f"{e.cfg.name or 'MAIN'} ({e.cfg.engine})"
+                          for e in self.engines)
         self.log.info(f"{len(self.engines)} session(s) enabled: {names}")
+        engines_used = sorted({e.cfg.engine for e in self.engines})
+        if len(engines_used) > 1:
+            self.log.info(f"{len(engines_used)} engines running side by side: "
+                          f"{', '.join(engines_used)}")
 
     # ------------------------------------------------------------------
     def on_bar(self, bar: Bar, now: datetime) -> None:
@@ -202,3 +212,21 @@ class MultiEngine:
     def strategy(self):
         """The first session's strategy — for single-session callers."""
         return self.engines[0].strategy
+
+    def strategy_for(self, session_name: str):
+        """The strategy belonging to a named session.
+
+        A closing trade must be journalled by the strategy that opened it. With
+        one engine, "the first session's strategy" happened to be right often
+        enough not to matter; with several engines running different strategies
+        it is simply wrong — a reversal exit would be reported by the breakout
+        strategy. `ClosedTrade.session_name` carries the answer, so use it.
+
+        Falls back to the first session when the name is unknown, which keeps
+        the single-session path behaving exactly as it always did.
+        """
+        want = str(session_name or "")
+        for e in self.engines:
+            if (e.cfg.name or "MAIN") == want:
+                return e.strategy
+        return self.engines[0].strategy if self.engines else None

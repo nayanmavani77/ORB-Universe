@@ -1,0 +1,208 @@
+# ===========================================================================
+#  REVERSAL ENGINE — configuration
+#
+#  This is the ONLY file you need to edit to play with the reversal strategy.
+#  Change a value, save, and run:
+#
+#      python tools/reversal_backtest.py          <- one backtest
+#      python tools/reversal_sweep.py             <- the whole sweep
+#
+#  Neither command needs any arguments. Every command-line flag still exists
+#  and OVERRIDES what is written here, so you can try one value without
+#  editing the file:
+#
+#      python tools/reversal_backtest.py --sl-mult 1.5
+#
+#  Five numbered sections:
+#
+#    1  BASE        which of the original config files to inherit from
+#    2  RUN         the single backtest — which window, which settings
+#    3  REVERSAL    the stop multiplier, the direction, the trade cap
+#    4  PERIOD      dates, data file and where output goes
+#    5  SWEEP       the lists used by tools/reversal_sweep.py
+#
+#  The two you will touch most are 3 and 5.
+#
+#  The original config.yaml and everything under orb/ are NOT modified by
+#  this file or by the reversal engine.
+# ===========================================================================
+
+
+# ===========================================================================
+# 1  BASE  —  what is inherited
+# ===========================================================================
+# The reversal engine does not redefine the instrument, the news dates, the
+# account size or the fill assumptions. It reads them from your existing
+# config file, so there is one place for those and it stays the original one.
+#
+# Inherited from here:  symbol (section 5), databento (6), backtest (7),
+#                       the news DATE lists (4), mt5 (live only).
+# Replaced by this file: session window, timeframe, R:R, stop, direction, cap.
+base_config: "config.yaml"
+
+
+# ===========================================================================
+# 2  RUN  —  the single backtest
+# ===========================================================================
+# Used by tools/reversal_backtest.py. Ignored by the sweep, which builds its
+# own combinations from section 5.
+run:
+  # Which session window. ASIA | LONDON | NEW_YORK
+  #   ASIA      opens 19:00 New York, trades until London opens  (03:00)
+  #   LONDON    opens 03:00 New York, trades until New York opens (09:30)
+  #   NEW_YORK  opens 09:30 New York, trades until 16:55
+  #             (16:55, not 19:00, so no position is open when the futures
+  #              contract rolls at 18:00)
+  session: LONDON
+
+  # The bar that must CLOSE beyond the range for a breakout to count.
+  # M1 | M5 | M15 | M30 | H1 | H4 | D1
+  signal_timeframe: "M5"
+
+  # How many minutes after the session opens the opening range is measured
+  # over. 15 means 03:00-03:15 for London.
+  orb_minutes: 15
+
+  # Target = this x the stop distance. See section 3 — the stop distance is
+  # now sl_range_mult x the range, so the target is
+  #     risk_reward x sl_range_mult x range
+  risk_reward: 2.0
+
+  # News dates listed in config.yaml section 4:
+  #   skip     do not trade those days
+  #   include  trade straight through them
+  news: skip
+
+  # Position size. Fixed lots — the engine does not scale by balance.
+  # NOTE: dollar risk per trade = lots x sl_range_mult x range x point value.
+  # Doubling sl_range_mult doubles the money at risk per trade at the same
+  # lot size, so net P&L is NOT comparable across multipliers unless you
+  # scale this to match. avg_r and total_r in the output already are.
+  lots: 1.0
+
+  # Leave these null to use the standard window for the session above.
+  # Set them to take manual control (broker/server time, HH:MM).
+  range_start: null       # e.g. "03:00"
+  range_end:   null       # e.g. "03:15"
+  stop_time:   null       # e.g. "09:30"
+
+  # none | normal | verbose — how much goes in the journal
+  log_level: normal
+
+
+# ===========================================================================
+# 3  REVERSAL  —  the part that does not exist in the original engine
+# ===========================================================================
+reversal:
+
+  # --- THE STOP LOSS -------------------------------------------------------
+  # Stop distance as a MULTIPLE OF THE OPENING RANGE height.
+  #
+  #     0.25   quarter of the range      tight
+  #     0.5    half the range            same as the original "mid_range"
+  #     0.75   three quarters
+  #     1.0    the whole range           same as the original "full_range"
+  #     1.5    one and a half ranges     wider than the original engine allows
+  #     2.0    two ranges                wider still
+  #
+  # 0.5 and 1.0 reproduce the original engine's two stop modes exactly — trade
+  # for trade, to the cent — so anything you have already run stays comparable.
+  # Any positive number is allowed, including 0.6 or 3.0.
+  #
+  # This REPLACES sl_mode from config.yaml. sl_mode is ignored here.
+  sl_range_mult: 0.5
+
+  # --- THE DIRECTION -------------------------------------------------------
+  #   reverse   fade the breakout — a close above the range high SELLS
+  #   forward   the ordinary breakout direction
+  #
+  # Run "forward" at the same settings as your control arm. If forward is
+  # profitable too, what you found is a stop distance that suits this market,
+  # not a fade edge.
+  direction: reverse
+
+  # --- HOW THE REVERSED STOP IS MEASURED -----------------------------------
+  # Only consulted when direction is "reverse". A reversed trade cannot reuse
+  # the original stop LEVEL — that level sits on the wrong side of the entry
+  # and the broker would close the trade instantly — so it keeps the stop
+  # DISTANCE and puts it on the far side of the entry.
+  #
+  #   range    risk = sl_range_mult x range height, measured from the fill.
+  #            Deterministic; does not depend on how far the breakout bar
+  #            overshot the range. This is the sane default.
+  #   mirror   risk = the exact distance the original trade would have taken
+  #            (overshoot included), mirrored. Reproduces the older
+  #            tools/reversal_test.py study.
+  sl_anchor: range
+
+  # --- HOW MANY TRADES PER SESSION -----------------------------------------
+  #   1   R     reverse the first breakout, then stop for the session
+  #   2   RR    reverse the first two, then stop
+  #   3   RRR   reverse the first three, then stop
+  #   0         unlimited — reverse every breakout the session produces
+  #
+  # The first failed breakout of a session is the informative one; later ones
+  # are often price already trending, and fading a real trend is expensive.
+  max_trades: 2
+
+  # Prefix written into the MT5 order comment so a reversed position is
+  # identifiable on the broker side. Comments are capped at 31 characters.
+  tag: "REV"
+
+
+# ===========================================================================
+# 4  PERIOD  —  dates, data and output
+# ===========================================================================
+period:
+  start: "2026-01-01"
+  end:   "2026-08-13"
+
+  # Leave null to use backtest.dbn_paths from config.yaml. Set it to point at
+  # different bars without touching the original file.
+  data: null            # e.g. "data/gc_1m_merged.parquet"
+
+output:
+  # Leave null and results go to the standard place:
+  #
+  #     outputs/<engine>/<run-name>/
+  #
+  # one root for every run in the project, one folder per engine, one per run.
+  # Set a path here (or pass --out) to override it for a single run.
+  dir: null
+
+
+# ===========================================================================
+# 5  SWEEP  —  the lists tools/reversal_sweep.py combines
+# ===========================================================================
+# Every combination of every list below is run. The total is the product of
+# the list lengths — check it first with:
+#
+#     python tools/reversal_sweep.py --dry-run
+#
+# As written below that is 3 x 3 x 2 x 5 x 6 x 3 x 2 = 3,240 runs.
+# Cut a list to cut the time. Roughly 4 seconds per run per core.
+sweep:
+  sessions:        [LONDON]
+  timeframes:      [M1, M5, M15]
+  orb_minutes:     [15, 30, 60]
+  news:            [include, skip]
+  risk_reward:     [1, 1.5, 2, 2.5, 3]
+
+  # The axis the original matrix never searched. Every run ever done before
+  # this file existed used 0.5, because that is what sl_mode: mid_range means
+  # and run_matrix.py never varied it.
+  sl_range_mult:   [0.25, 0.5, 0.75, 1, 1.5, 2]
+
+  max_trades:      [1, 2, 3]
+
+  # Keep both. "reverse" alone cannot tell you whether the fade is doing the
+  # work or the stop distance is. With both, the sweep writes
+  # _summary/reverse_vs_forward.csv comparing them setting for setting.
+  directions:      [reverse, forward]
+
+  # null -> outputs/reversal/sweep/
+  out_dir: null
+
+  # Write a trades CSV for every configuration as well as the summary.
+  # 3,240 files — off by default.
+  save_trades: false

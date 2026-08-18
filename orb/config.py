@@ -92,6 +92,26 @@ class StrategyConfig:
     name: str = ""
     enabled: bool = True
 
+    # === Which strategy this session runs ===
+    # The name of a registered engine — see `orb/engines/`. Every session picks
+    # its own, so Asia can run one strategy while London runs another, in the
+    # same backtest and in the same live process.
+    #
+    # `engine_options` carries whatever that engine needs beyond the standard
+    # fields below. Its contents are validated by the engine itself (each has a
+    # `settings.py`), so this file never has to learn one strategy's vocabulary.
+    # A plain dict is used deliberately: it survives `asdict()`, so options are
+    # inherited by sessions and appear in `to_dict()` / `--show-config`.
+    #
+    #   sessions:
+    #     london:
+    #       engine: reversal
+    #       engine_options:
+    #         sl_range_mult: 0.75
+    #         direction: reverse
+    engine: str = "orb"
+    engine_options: Dict[str, Any] = field(default_factory=dict)
+
     # === Session times (broker/server time) ===
     range_start: str = "09:00"            # InpRangeStart
     range_end: str = "10:00"              # InpRangeEnd
@@ -136,6 +156,19 @@ class StrategyConfig:
 
     def validate(self) -> None:
         from .timeutils import parse_hhmm
+        # The engine NAME is checked here; its OPTIONS are not. Validating the
+        # options would mean this file knowing what every strategy's settings
+        # mean, which is exactly the coupling `engine_options` exists to avoid.
+        # The engine validates them itself when the strategy is built.
+        self.engine = str(self.engine or "orb").strip().lower()
+        if not self.engine:
+            raise ValueError("engine cannot be empty — name a registered engine.")
+        if self.engine_options is None:
+            self.engine_options = {}
+        if not isinstance(self.engine_options, dict):
+            raise ValueError(
+                f"engine_options must be a mapping of option names to values "
+                f"(got {type(self.engine_options).__name__}).")
         s, dis = parse_hhmm(self.range_start)
         if dis:
             raise ValueError("Invalid Range Start Time. Use HH:MM, e.g. 09:00")
@@ -581,6 +614,43 @@ class AppConfig:
                             mode=ov.get("mode", basecat.mode),
                             dates=ov.get("dates", basecat.dates))
                     merged["news"] = NewsConfig(**cats)
+                # `engine_options` is merged OPTION BY OPTION, for the same
+                # reason `news` is merged category by category: a session that
+                # states one option must override that one option, not silently
+                # discard the others.
+                #
+                #   defaults:  engine_options: {sl_range_mult: 0.5,
+                #                               max_trades_per_session: 2}
+                #   sessions:
+                #     london:  engine_options: {sl_range_mult: 1.5}
+                #
+                # London wants a wider stop and everything else as before.
+                # Replacing the whole dict would drop the cap back to the
+                # engine's own default, and nothing would say so — the run
+                # would simply take a different number of trades than the
+                # config appears to ask for.
+                # Options are inherited only when the session runs the SAME
+                # engine as the defaults. A session that names a different
+                # engine starts from an empty dict: the inherited options are
+                # written in another strategy's vocabulary, and handing them
+                # over would either be rejected as unknown or — worse — happen
+                # to share a name and mean something else.
+                session_engine = str(sdata.get("engine")
+                                     or base.get("engine") or "orb").strip().lower()
+                base_engine = str(base.get("engine") or "orb").strip().lower()
+                session_options = sdata.pop("engine_options", None)
+                if session_options is not None:
+                    if not isinstance(session_options, dict):
+                        raise ValueError(
+                            f"Session '{sname}': engine_options must be a "
+                            f"mapping of option names to values (got "
+                            f"{type(session_options).__name__}).")
+                    inherited = (dict(base.get("engine_options") or {})
+                                 if session_engine == base_engine else {})
+                    inherited.update(session_options)
+                    merged["engine_options"] = inherited
+                elif session_engine != base_engine:
+                    merged["engine_options"] = {}
                 merged.update(sdata)
                 merged["name"] = sdata.get("name") or str(sname)
                 # Every session needs its OWN magic number so MetaTrader can
@@ -600,3 +670,26 @@ class AppConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def journal_settings(cfg):
+    """Level, file and time-stamp for the ONE journal a run writes.
+
+    There is a single log file but many sessions, and a session may set its own
+    `log_level`. Taking the level from the shared defaults would silently
+    discard that: a session asking for `verbose` would get `normal`, and the
+    detail it was turned on for would never be written.
+
+    So the level is the MOST verbose any enabled session asks for. Turning
+    detail on for one session turns it on, and a session set to `none` cannot
+    silence a sibling that wants it. File path and time-stamp come from the
+    first session that names them, falling back to the defaults.
+    """
+    from .logger import parse_log_level
+    sessions = list(cfg.enabled_sessions()) or [cfg.strategy]
+    level = max(parse_log_level(s.log_level) for s in sessions)
+    file_path = next((s.log_file for s in sessions if s.log_file),
+                     cfg.strategy.log_file)
+    show_time = next((s.log_show_time for s in sessions
+                      if s.log_show_time is not None), cfg.strategy.log_show_time)
+    return level, file_path, bool(show_time)

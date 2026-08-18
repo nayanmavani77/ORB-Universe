@@ -127,12 +127,17 @@ def _max_drawdown(curve: pd.Series) -> Dict[str, object]:
     running_max = curve.cummax()
     dd = curve - running_max
     dd_pct = np.where(running_max > 0, dd / running_max * 100.0, 0.0)
+    # index by POSITION, never by label: two trades can close at the same
+    # instant (a stop-time flatten, or several sessions sharing a timestamp),
+    # and `.loc` on a duplicated label returns a Series, not a number — which
+    # made the comparison below raise instead of reporting a drawdown
     i_trough = int(dd.values.argmin())
     trough_time = curve.index[i_trough]
-    peak_time = curve.iloc[:i_trough + 1].idxmax() if i_trough >= 0 else curve.index[0]
-    peak_val = curve.loc[peak_time] if peak_time is not None else curve.iloc[0]
+    i_peak = int(curve.iloc[:i_trough + 1].values.argmax()) if i_trough >= 0 else 0
+    peak_time = curve.index[i_peak]
+    peak_val = float(curve.iloc[i_peak])
     after = curve.iloc[i_trough:]
-    rec = after[after >= peak_val]
+    rec = after[after.values >= peak_val]
     recovery_time = rec.index[0] if len(rec) else None
     return {
         "max_dd_money": float(-dd.min()),
@@ -1110,36 +1115,80 @@ def _news_compact(s) -> str:
     return f'{", ".join(parts)} <span class="muted">({dates} dates)</span>'
 
 
+def _engine_of(s) -> str:
+    return str(getattr(s, "engine", "") or "orb")
+
+
+def _stop_loss_cell(s) -> str:
+    """How this session's stop was placed — asked of the ENGINE it ran.
+
+    `sl_mode` is a field of every session, but not every engine reads it: the
+    reverse engine sizes its stop from `sl_range_mult` and ignores `sl_mode`
+    entirely. Printing "mid range" for such a session would state, in the
+    report, the opposite of what the run actually did.
+    """
+    options = dict(getattr(s, "engine_options", None) or {})
+    mult = options.get("sl_range_mult")
+    if mult is not None:
+        note = {0.5: " (= mid range)", 1.0: " (= full range)"}.get(float(mult), "")
+        anchor = options.get("sl_anchor")
+        tail = f' <span class="muted">{html.escape(str(anchor))}</span>' \
+            if anchor and anchor != "range" else ""
+        return f"{float(mult):g} × range{note}{tail}"
+    return "full range" if s.sl_mode == "full_range" else "mid range"
+
+
+def _engine_options_cell(s) -> str:
+    """Everything the engine was given, minus what already has its own column,
+    so nothing a run used is invisible here."""
+    options = dict(getattr(s, "engine_options", None) or {})
+    for shown in ("sl_range_mult", "sl_anchor", "max_trades_per_session"):
+        options.pop(shown, None)
+    if not options:
+        return '<span class="muted">—</span>'
+    return ", ".join(f"{html.escape(str(k))}={html.escape(str(v))}"
+                     for k, v in sorted(options.items()))
+
+
 def _sessions_table(cfg, result, df) -> str:
     """The settings each session ACTUALLY ran with — read from the sessions,
-    never from the shared defaults block."""
+    never from the shared defaults block, and never from a field the session's
+    engine does not use."""
     sessions = cfg.enabled_sessions() if hasattr(cfg, "enabled_sessions") \
         else [cfg.strategy]
-    cols = ("Session", "Range window", "Stop time", "Signal TF", "Stop loss",
-            "Risk : reward", "Lots", "Re-entry", "Max / session",
-            "Close at stop", "News", "Trades")
+    multi_engine = len({_engine_of(s) for s in sessions}) > 1
+    cols = ("Session", "Engine", "Range window", "Stop time", "Signal TF",
+            "Stop loss", "Risk : reward", "Lots", "Re-entry", "Max / session",
+            "Close at stop", "Engine options", "News", "Trades")
     body = []
     for i, s in enumerate(sessions):
         name = s.name or "MAIN"
         n_tr = int((df["session_name"] == name).sum()) \
             if "session_name" in df.columns else len(df)
+        engine = _engine_of(s)
         cells = [
             f'<span class="swatch" style="background:var(--s-{(i % 4) + 1})"></span>'
             + html.escape(name),
+            f'<code>{html.escape(engine)}</code>',
             f"{s.range_start} – {s.range_end}",
             s.stop_time if s.stop_time not in ("", "0") else "disabled",
             s.signal_timeframe,
-            "full range" if s.sl_mode == "full_range" else "mid range",
+            _stop_loss_cell(s),
             f"1 : {s.risk_reward:g}",
             f"{s.lots:g}",
             "yes" if s.require_range_reentry else "no",
             str(s.max_trades_per_session or "unlimited"),
             "yes" if s.close_at_stop_time else "no",
+            _engine_options_cell(s),
             _news_compact(s),
             f"{n_tr:,}",
         ]
         body.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-    return ("<table><thead><tr>" +
+    note = ""
+    if multi_engine:
+        note = ('<p class="note">This run mixed engines — each session traded '
+                'the strategy named in its Engine column, on one account.</p>')
+    return (note + "<table><thead><tr>" +
             "".join(f"<th>{html.escape(c)}</th>" for c in cols) +
             "</tr></thead><tbody>" + "".join(body) + "</tbody></table>")
 

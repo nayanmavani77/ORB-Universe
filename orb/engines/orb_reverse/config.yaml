@@ -1,26 +1,47 @@
 # ===========================================================================
-#  Range Breakout EA — configuration
+#  ENGINE: orb_reverse
+#  fade the opening-range breakout
 #
-#  Read top to bottom. Seven numbered sections:
+#  THIS FILE IS THE COMPLETE CONFIGURATION FOR THIS ENGINE.
+#  There is no parent config. Instrument, data, account, fill assumptions,
+#  news dates, sessions and the sweep grid are all here. Open this one file
+#  and you can see everything a run of this engine will use.
 #
-#    1  CLOCK       what time zone the session times are written in
-#    2  SESSIONS    WHICH windows to trade, and which are ON or OFF
-#    3  DEFAULTS    HOW to trade — shared by every session
-#    4  NEWS DAYS   which calendar dates to avoid or target
-#    5  INSTRUMENT  contract details used for price rounding and P&L
-#    6  DATA        where the bars come from
-#    7  BACKTEST    account size and fill assumptions
+#      python tools/backtest.py --engine orb_reverse      one backtest
+#      python tools/sweep.py    --engine orb_reverse      the whole sweep
 #
-#  The two you will touch most are 2 and 3.
+#  Running engines TOGETHER
+#  ------------------------
+#  Name several and their sessions merge onto one account:
 #
-#    Section 2 answers "when do I trade?"   -> one entry per session
-#    Section 3 answers "how do I trade?"    -> one shared rule set
+#      python tools/backtest.py --engine orb,orb_reverse
+#      python run_live.py       --engine orb,orb_reverse
 #
-#  Every option in section 3 can be repeated inside a session to override it
-#  just for that session. Nothing else in the file is per-session.
+#  Each session runs the engine of the file it is written in, so nothing has
+#  to be restated. The shared blocks below — INSTRUMENT, DATA, BACKTEST, MT5
+#  and the CLOCK — must MATCH in every engine config taking part, because a
+#  run has one account, one instrument and one data feed. A mismatch is
+#  reported with the field and both values rather than silently resolved.
 #
-#  Every option is also settable from the terminal — see docs/CLI.md.
+#  Sections
+#  --------
+#    ENGINE      which engine this file drives (must match the folder name)
+#    CLOCK       what time zone the session times are written in
+#    SESSIONS    WHICH windows to trade, and which are ON or OFF
+#    DEFAULTS    HOW to trade — shared by every session in this file
+#    NEWS DAYS   which calendar dates to avoid or target
+#    INSTRUMENT / DATA / BACKTEST / MT5   the shared blocks
+#    PERIOD      backtest dates and where output goes
+#    SWEEP       the lists tools/sweep.py combines
 # ===========================================================================
+
+
+# ===========================================================================
+# 0  ENGINE
+# ===========================================================================
+# Every session below runs this engine unless the session names another.
+# That per-session override is how one file drives a mixed run.
+engine: orb_reverse
 
 
 # ===========================================================================
@@ -35,89 +56,58 @@
 server_timezone: "America/New_York"     # set to null to use the offset below
 server_utc_offset_hours: 0              # ignored while server_timezone is set
 
-
 # ===========================================================================
 # 2  SESSIONS  —  WHEN to trade
 # ===========================================================================
-# One entry per session. Each runs the SAME strategy rules on its own window.
+# One entry per window. `enabled` switches each on or off. Enabled windows may
+# not overlap: there is one account and one position at a time.
 #
-#   enabled: true / false
-#       The ON/OFF switch. A disabled session is never built — it takes no
-#       trade and costs nothing. Run 1, 2 or all 3.
+# Every session here runs `orb_reverse` unless it names another engine, and
+# each carries its own `engine_options`.
 #
-#   range_start / range_end
-#       The opening range. Its high and low become the breakout levels.
-#
-#   stop_time
-#       No new entries after this, and any open trade is closed (see
-#       close_at_stop_time in section 3).
-#
-# These three times are REQUIRED in every session and are never inherited, so
-# a session's window is always visible right here.
-#
-# RULE: enabled sessions must NOT overlap. Each has to be flat at its own
-# stop_time before the next one opens, so two sessions can never compete for
-# the single account position. The config is rejected at load time if two
-# enabled windows share any part of the clock.
-#
-# To give one session its own rules, repeat any section-3 option inside it —
-# see the commented lines under `asia` below.
-#
-# From the terminal:
-#   --sessions asia,new_york            run exactly these, switch off the rest
-#   --set sessions.asia.risk_reward=3   change one session's setting
+# MAGIC NUMBERS: these must not collide with the ones in another engine's
+# config if you ever run the two together — the broker tells positions apart
+# by magic. The orb engine uses 202608xx; this one uses 202609xx.
 sessions:
 
-  asia:
-    enabled: true
-    range_start: "19:00"          # Asia open
-    range_end:   "19:30"
-    stop_time:   "02:55"          # flat before London opens
-    # --- optional per-session overrides (uncomment to use) ---
-    # signal_timeframe: "M1"
-    # risk_reward: 1.5
-    # sl_mode: full_range
-    # lots: 2.0
-    risk_reward: 2.0
-    signal_timeframe: "M1"
-    news_mode: "off"
-
-    #
-    # News filter for THIS session only. One line switches the whole thing:
-    #   news_mode: "off"    skip every news date listed in section 4
-    #   news_mode: "on"     trade straight through them
-    #   news_mode: "only"   trade nothing except those dates
-    # So "skip news in Asia but trade it in New York" is one line in each.
-    # news_mode: "off"
-    #
-    # Or override single categories. Dates are always inherited from section 4
-    # — you only restate what differs:
-    # news:
-    #   federal_funds_rate: { mode: "off" }   # sit out FOMC in this session
-    #   core_cpi_mm:        { mode: "on"  }   # but trade CPI
-
   london:
-    enabled: false
+    enabled: true
     range_start: "03:00"          # London open
-    range_end:   "03:30"
-    stop_time:   "09:25"          # flat before New York opens
+    range_end:   "03:15"          # 15-minute opening range
+    stop_time:   "09:30"          # flat when New York opens
+    signal_timeframe: "M15"
+    risk_reward: 1.0
+    magic: 20260901
+    # 1=R  2=RR  3=RRR  0=unlimited. A SESSION setting, not an engine option —
+    # the core enforces it, so it belongs here where the core reads it.
+    max_trades_per_session: 3
+    engine_options:
+      sl_range_mult: 0.75         # stop = 0.75 x the opening range
+      direction: reverse          # reverse (fade) | forward (control arm)
+      sl_anchor: range            # range | mirror
+      order_tag: "REV"
+
+  asia:
+    enabled: false
+    range_start: "19:00"
+    range_end:   "19:15"
+    stop_time:   "02:55"
+    magic: 20260902
+    max_trades_per_session: 2
+    engine_options:
+      sl_range_mult: 0.5
+      direction: reverse
 
   new_york:
-    enabled: true
-    range_start: "09:30"          # New York open
+    enabled: false
+    range_start: "09:30"
     range_end:   "09:45"
     stop_time:   "16:55"
-    risk_reward: 4.5
-    signal_timeframe: "M15"
-    news_mode: "on"
-
-                                  # flat before the 17:00 COMEX halt
-                                  # NOT 17:00 — that is the exact moment COMEX
-                                  # halts, so no tick arrives to trigger the
-                                  # close and the position rides the 17:00-18:00
-                                  # break (and the whole weekend on a Friday).
-
-
+    magic: 20260903
+    max_trades_per_session: 2
+    engine_options:
+      sl_range_mult: 0.5
+      direction: reverse
 
 
 # ===========================================================================
@@ -131,7 +121,7 @@ sessions:
 defaults:
 
   # --- signal ---
-  signal_timeframe: "M5"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
+  signal_timeframe: "M15"         # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
                                   # the bar that must CLOSE beyond the range
 
   # --- risk ---
@@ -160,7 +150,6 @@ defaults:
   # --- identification ---
   magic: 20260814                 # InpMagic — tags this EA's orders in MT5
   comment: "RangeBreak"           # InpComment — order comment
-
 
 # ===========================================================================
 # 4  NEWS DAYS
@@ -202,7 +191,7 @@ defaults:
 news:
 
   core_cpi_mm:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-13
       2026-02-13
@@ -214,7 +203,7 @@ news:
       2026-08-12
 
   unemployment_rate:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-09
       2026-02-11
@@ -226,7 +215,7 @@ news:
       2026-08-07
 
   non_farm_employment_change:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-09
       2026-02-11
@@ -238,7 +227,7 @@ news:
       2026-08-07
 
   ism_manufacturing_pmi:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-05
       2026-02-02
@@ -250,7 +239,7 @@ news:
       2026-08-03
 
   core_pce_price_index_mm:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-22
       2026-02-20
@@ -262,7 +251,7 @@ news:
       2026-07-30
 
   federal_funds_rate:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-28
       2026-03-18
@@ -271,7 +260,7 @@ news:
       2026-07-29
 
   core_ppi_mm:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-14
       2026-01-30
@@ -284,7 +273,7 @@ news:
       2026-08-13
 
   ism_services_pmi:
-    mode: "on"
+    mode: "off"
     dates: |
       2026-01-07
       2026-02-04
@@ -300,7 +289,6 @@ news:
 news_days: ""
 news_trading: "off"
 
-
 # ===========================================================================
 # 5  INSTRUMENT
 # ===========================================================================
@@ -310,7 +298,7 @@ symbol:
   name: "GC"                      # COMEX gold, 100 troy oz
   digits: 2
   point: 0.01
-  tick_size: 0.1                 # GC minimum tick
+  tick_size: 0.10                 # GC minimum tick
   stops_level_points: 0           # SYMBOL_TRADE_STOPS_LEVEL
   volume_min: 1.0
   volume_max: 100.0
@@ -394,8 +382,8 @@ mt5:
   password: null
   server: null
   terminal_path: null             # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
-  deviation_points: 0            # max slippage allowed on a market order
-  dry_run: false                   # true = log the order, do NOT send it
+  deviation_points: 20            # max slippage allowed on a market order
+  dry_run: true                   # true = log the order, do NOT send it
 
   # The signal is computed on the Databento instrument (CME GC) and executed on
   # the MT5 symbol above (spot XAUUSD). The two track each other but quote tens
@@ -407,3 +395,40 @@ mt5:
   #   false -> SL and TP are the feed's absolute levels. Correct ONLY when the
   #            MT5 symbol is the very instrument the bars came from.
   translate_levels: true
+
+# ===========================================================================
+# 8  PERIOD  —  backtest dates and output
+# ===========================================================================
+period:
+  start: "2026-01-01"
+  end:   "2026-08-13"
+
+  data: null
+
+  # null -> backtest/orb_reverse/<run-name>/
+  out_dir: null
+
+
+# ===========================================================================
+# 9  SWEEP  —  the lists tools/sweep.py combines
+# ===========================================================================
+#     python tools/sweep.py --engine orb_reverse --dry-run
+sweep:
+  sessions:        [LONDON]
+  timeframes:      [M1, M5, M15]
+  orb_minutes:     [15, 30, 60]
+  news:            [include, skip]
+  risk_reward:     [1, 1.5, 2, 2.5, 3]
+
+  # The axis the orb engine cannot express — 0.5 and 1.0 ARE its two stop
+  # modes, exactly; the rest is ground it cannot reach.
+  sl_range_mults:  [0.25, 0.5, 0.75, 1, 1.5, 2]
+
+  trade_caps:      [1, 2, 3]
+
+  # Keep both. "reverse" alone cannot tell you whether the fade is doing the
+  # work or the stop distance is.
+  directions:      [reverse, forward]
+
+  out_dir: null                   # null -> backtest/orb_reverse/sweep/
+  save_trades: false
