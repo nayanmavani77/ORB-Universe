@@ -71,7 +71,7 @@ server_utc_offset_hours: 0              # ignored while server_timezone is set
 sessions:
 
   london:
-    enabled: false
+    enabled: true
     range_start: "03:00"          # London open
     range_end:   "03:15"          # 15-minute opening range
     stop_time:   "09:30"          # flat when New York opens
@@ -99,12 +99,12 @@ sessions:
       direction: reverse
 
   new_york:
-    enabled: true
-    range_start: "10:33"
-    range_end:   "10:34"
+    enabled: false
+    range_start: "09:30"
+    range_end:   "10:00"
     stop_time:   "16:55"
     magic: 20260903
-    max_trades_per_session: 10
+    max_trades_per_session: 2
     engine_options:
       sl_range_mult: 0.5
       direction: reverse
