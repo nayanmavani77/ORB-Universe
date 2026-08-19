@@ -51,6 +51,16 @@ from orb.live_trader import LiveTrader                      # noqa: E402
 from orb.logger import RbeaLogger                           # noqa: E402
 from orb.runconfig import RunConfig                         # noqa: E402
 
+def in_window(session, window: str) -> bool:
+    """Does this session belong to that WINDOW?
+
+    A window that trades several instruments expands to one session per cell —
+    `asia_gc`, `asia_es` — so a test meaning "the Asia window" cannot match on
+    the bare name any more. The gc cell is the one these tests drive, because
+    their synthetic bars are gold's.
+    """
+    name = session.name or ""
+    return name == window or name.startswith(window + "_")
 BASE = datetime(2026, 8, 17)
 #: Asia's window in the shipped config: range 19:00-19:30, trade until 02:55.
 RANGE_END = BASE + timedelta(hours=19, minutes=30)
@@ -84,7 +94,9 @@ class HistoryBroker(SimBroker):
         self._prior = prior
         self.asked = []
 
-    def trades_opened_since(self, magic, since):
+    def trades_opened_since(self, magic, since, instrument=""):
+        # `instrument` scopes the query on a shared account — a session on ES
+        # must not count gold's deals against its cap.
         self.asked.append((magic, since))
         return self._prior
 
@@ -98,7 +110,7 @@ def m1(minute, price):
 def asia_config():
     cfg = RunConfig.load("orb").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "asia")
+        s.enabled = in_window(s, "asia") and (s.instrument or "gc") == "gc"
         if s.enabled:
             s.signal_timeframe = "M1"
             s.max_trades_per_session = 2
@@ -246,7 +258,7 @@ def test_a_single_bar_range_window_is_still_replayed():
     trader = LiveTrader(cfg, broker=broker, feed=Feed([]),
                         logger=RbeaLogger(level=0))
     trader._warmup_bars = list(WARM_ONE)
-    session = next(s for s in cfg.enabled_sessions() if s.name == "asia")
+    session = next(s for s in cfg.enabled_sessions() if in_window(s, "asia"))
     start = BASE + timedelta(hours=19)
     # a ONE-bar window: 19:00..19:01
     got = trader._replay_session(start, start + timedelta(minutes=1), session)

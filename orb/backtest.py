@@ -39,6 +39,85 @@ class BacktestResult:
     config: AppConfig
 
 
+def load_instrument_bars(cfg: AppConfig, clock, *, start=None, end=None,
+                         logger=None, instruments=None):
+    """Every instrument's bars, tagged and merged into one time-ordered stream.
+
+    Each instrument is loaded through the SAME single-contract, spread-free
+    path a single-instrument run uses — `load_dbn_bars` with that
+    instrument's own files and contract mode — and only then tagged and
+    merged. The merge is stable on (time, instrument) so a run is
+    reproducible whatever order the files were read in.
+
+    Returns the flat list `run_backtest` expects. With no `instruments:`
+    block it loads exactly what it always did.
+    """
+    from .data.dbn import load_dbn_bars
+    d = cfg.databento
+    if not cfg.instruments:
+        return load_dbn_bars(
+            cfg.backtest.dbn_paths, clock, contract_mode=d.contract_mode,
+            contract_symbol=d.contract_symbol,
+            include_spreads=d.include_spreads,
+            roll_min_volume=d.roll_min_volume,
+            roll_boundary_hour=d.roll_boundary_hour,
+            start=start, end=end, logger=logger)
+
+    # Which instruments to load.
+    #
+    # `instruments=` wins when given. A SWEEP needs it: its bars are loaded
+    # once and shared by every configuration in the grid, so they must cover
+    # every instrument the grid trades — not just the ones the first item's
+    # session happens to name. Getting this wrong made an ES-only bar list
+    # serve the NQ configurations too, and they returned ES's trades.
+    #
+    # Otherwise: only what an ENABLED session actually trades. A config may
+    # declare instruments it is not trading today — a 3x3 (session x
+    # instrument) matrix with most cells switched off is the normal case — and
+    # those must not demand a data file that has not been downloaded yet.
+    # Loading them anyway would also cost minutes and gigabytes for bars
+    # nothing reads.
+    if instruments is not None:
+        wanted = {str(x).strip() for x in instruments if str(x).strip()}
+        unknown = sorted(wanted - set(cfg.instruments))
+        if unknown:
+            raise ValueError(
+                f"Cannot load bars for undeclared instrument(s) {unknown}. "
+                f"Declared: {sorted(cfg.instruments)}.")
+    else:
+        wanted = {(s.instrument or "") for s in cfg.enabled_sessions()} - {""}
+    if not wanted:
+        wanted = set(cfg.instruments)
+
+    out = []
+    for name, inst in cfg.instruments.items():
+        if name not in wanted:
+            continue
+        paths = inst.data or cfg.backtest.dbn_paths
+        if not paths:
+            raise ValueError(
+                f"Instrument '{name}' has no data. Give it `data: [...]` in "
+                f"the instruments block, or set backtest.dbn_paths for the "
+                f"whole run.")
+        bars = load_dbn_bars(
+            paths, clock,
+            contract_mode=(inst.contract_mode or d.contract_mode),
+            contract_symbol=(inst.contract_symbol or d.contract_symbol),
+            include_spreads=d.include_spreads,
+            roll_min_volume=d.roll_min_volume,
+            roll_boundary_hour=d.roll_boundary_hour,
+            start=start, end=end, logger=logger)
+        for b in bars:
+            b.instrument = name
+        if logger:
+            logger.info(f"{name:<10} {len(bars):,} bars from "
+                        f"{len(paths) if isinstance(paths, (list, tuple)) else 1}"
+                        f" file(s)")
+        out.extend(bars)
+    out.sort(key=lambda b: (b.time, b.instrument))
+    return out
+
+
 def make_clock(cfg: AppConfig) -> ServerClock:
     return ServerClock(utc_offset_hours=cfg.server_utc_offset_hours,
                        timezone_name=cfg.server_timezone)
@@ -63,6 +142,11 @@ def run_backtest(cfg: AppConfig, bars: Sequence[Bar],
         pessimistic_intrabar=bt.pessimistic_intrabar,
         logger=log,
     )
+    # Register each instrument's contract details BEFORE any session opens, so
+    # P&L, tick rounding and lot steps are that instrument's own. Without this
+    # an ES trade would be valued with gold's 100-per-point.
+    for name, inst in (cfg.instruments or {}).items():
+        broker.add_instrument(name, inst.spec(cfg.symbol))
 
     # one engine per enabled session; a single-session config yields exactly
     # one, driving the identical tick sequence it always did
@@ -86,10 +170,31 @@ def run_backtest(cfg: AppConfig, bars: Sequence[Bar],
     for bar in bars:
         engine.on_bar(bar, now=bar.time)
 
+    # Did ANY bar reach a session? Zero trades is a legitimate result — a
+    # quiet market, a filter that never fired. Zero bars ROUTED is not: it
+    # means the bars and the sessions describe different instruments, and
+    # reporting that as a flat month would hide a wiring mistake behind a
+    # plausible-looking answer.
+    if not getattr(engine, "_routed", 1):
+        want = sorted({(s.instrument or "") for s in cfg.enabled_sessions()})
+        got = sorted(getattr(engine, "_skipped_tags", set()))
+        raise ValueError(
+            f"Not one bar reached a session. The sessions trade {want}, the "
+            f"bars are tagged {got}. Nothing was traded because nothing "
+            f"matched — load the bars for the instrument(s) this run actually "
+            f"trades.")
+
     engine.flush()
-    if broker.position is not None:
-        broker.set_market(bars[-1].close, bars[-1].time)
-        broker.close_all("end of backtest")
+    if broker.positions:
+        # Flatten every instrument at ITS OWN last price. Using one bar's close
+        # for all of them would value an ES position at gold's last print.
+        last = {}
+        for bar in bars:
+            last[getattr(bar, "instrument", "") or ""] = bar
+        for key in list(broker.positions):
+            tail = last.get(key) or bars[-1]
+            broker.set_market(tail.close, tail.time, key)
+            broker.close_all("end of backtest", instrument=key)
 
     log.info(f"Backtest finished | {len(broker.trades)} trade(s) | "
              f"final balance {broker.balance:,.2f} {cfg.symbol.currency}")

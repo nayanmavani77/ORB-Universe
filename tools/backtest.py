@@ -36,8 +36,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orb.backtest import make_clock, run_backtest                 # noqa: E402
-from orb.data.dbn import load_dbn_bars                            # noqa: E402
+from orb.backtest import (load_instrument_bars, make_clock,       # noqa: E402
+                          run_backtest)
 from orb.logger import RbeaLogger, parse_log_level                # noqa: E402
 from orb.outputs import resolve as resolve_out                    # noqa: E402
 from orb.report import compute_stats, write_report                # noqa: E402
@@ -70,15 +70,9 @@ def _execute(app, name, out, start, end, level, header) -> int:
         session.log_file = log_path
     app.strategy.log_file = log_path
 
-    d = app.databento
     print("Loading bars ...")
-    bars = load_dbn_bars(app.backtest.dbn_paths, make_clock(app),
-                         contract_mode=d.contract_mode,
-                         contract_symbol=d.contract_symbol,
-                         include_spreads=d.include_spreads,
-                         roll_min_volume=d.roll_min_volume,
-                         roll_boundary_hour=d.roll_boundary_hour,
-                         start=start, end=end, logger=RbeaLogger(level=0))
+    bars = load_instrument_bars(app, make_clock(app), start=start, end=end,
+                                logger=RbeaLogger(level=0))
     print(f"  {len(bars):,} bars  {bars[0].time:%Y-%m-%d %H:%M} .. "
           f"{bars[-1].time:%Y-%m-%d %H:%M}  (New York time)\n")
 
@@ -122,13 +116,16 @@ def _execute(app, name, out, start, end, level, header) -> int:
 #: `--rr 3` apply to?". Rather than pick one silently, a merged run rejects
 #: them and says so. (`--out` is handled separately; it names the output
 #: folder, which a merged run does have exactly one of.)
-MERGED_OK = ("start", "end", "data", "log_level", "out")
+#: `--instruments` IS honoured in a merged run: it selects instruments, which
+#: every engine in the run shares, unlike the per-engine knobs below.
+MERGED_OK = ("start", "end", "data", "log_level", "out", "instruments")
 
 #: Human-facing flag names, for the error message above. Keyed by the argparse
 #: destination so the two lists can never drift apart.
 FLAG_NAMES = {
     "session": "--session", "signal_timeframe": "--tf", "orb_minutes": "--orb",
     "risk_reward": "--rr", "lots": "--lots", "news": "--news",
+    "instruments": "--instruments",
     "max_trades_per_session": "--max-trades",
     "options": "--set", "sl_mult": "--sl-mult",
     "forward": "--forward", "reverse": "--reverse",
@@ -170,6 +167,8 @@ def _run_merged(a, engines) -> int:
         return 2
     configs = RunConfig.load_many(engines)
     app = merge(configs)                     # raises on a shared-block mismatch
+    if a.instruments:
+        app.select_instruments(a.instruments)
     start, end = merged_dates(configs)
     if a.start:
         start = a.start
@@ -216,6 +215,10 @@ def main() -> int:
                    help="print the settings that would run, then stop")
 
     g = p.add_argument_group("run overrides — omit to use the config file")
+    g.add_argument("--instruments", "-i", default=None, metavar="A,B",
+                   help="which instruments to trade this run, comma "
+                        "separated, e.g. -i gc,es. Omit to trade every one "
+                        "declared in the engine's `instruments:` block.")
     g.add_argument("--session", default=None)
     g.add_argument("--tf", dest="signal_timeframe", default=None)
     g.add_argument("--orb", dest="orb_minutes", type=int, default=None)
@@ -294,10 +297,16 @@ def main() -> int:
     # stack trace — a typo in `--set` is a user error, not a crash.
     try:
         app = rc.app_config(run_over)
+        if a.instruments:
+            app.select_instruments(a.instruments)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    from orb.outputs import instruments_of
     name = rc.run_name(run_over)
+    tag = instruments_of(app)
+    if tag and not name.upper().startswith(tag.upper()):
+        name = f"{tag.upper()}_{name}"
     start, end = rc.dates()
     out = resolve_out(app, name, out_dir=a.out or rc.out_dir())
 

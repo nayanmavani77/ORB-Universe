@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, fields as dc_fields
 from typing import Any, Dict, List, Optional
 
 SECONDS_PER_DAY = 86400
@@ -117,6 +117,12 @@ class StrategyConfig:
     # disagree.
     engine: str = "orb"
     engine_options: Dict[str, Any] = field(default_factory=dict)
+
+    #: which instrument this session trades — a key in `AppConfig.instruments`.
+    #: Empty means the run's single instrument, which is every config that
+    #: predates multi-instrument support. Two sessions on DIFFERENT
+    #: instruments may share a clock window; two on the SAME one may not.
+    instrument: str = ""
 
     # === Session times (broker/server time) ===
     range_start: str = "09:00"            # InpRangeStart
@@ -352,6 +358,185 @@ class MT5Config:
 # Root
 # ==========================================================================
 @dataclass
+class InstrumentConfig:
+    """One tradeable instrument: where its signal comes from, where it executes.
+
+    This is the whole user-facing surface for adding a symbol. Everything else
+    — contract digits, tick size, volume limits — is read from MT5 at connect
+    and overrides whatever is set here, so a new instrument needs four lines:
+
+        instruments:
+          es:
+            signal: "ES.FUT"          # Databento parent symbol
+            mt5:    "US500"           # the symbol in YOUR terminal
+            value_per_point: 50.0     # money per 1.0 of price, per 1 lot
+            data:   ["data/es_1m.parquet"]
+
+    `signal` and `mt5` are deliberately different fields: the strategy reads
+    CME futures and the order goes to a CFD, and the two quote tens of dollars
+    apart. `translate_levels` (below) is what carries SL/TP across as
+    DISTANCES rather than levels, and it defaults to true precisely because
+    naming two different symbols is the normal case.
+    """
+    #: key used by sessions and by `--instrument`; filled in from the mapping
+    name: str = ""
+    #: Databento parent symbol the signal is built from, e.g. "ES.FUT"
+    signal: str = ""
+    #: the symbol in the MT5 terminal the order is sent to, e.g. "US500"
+    mt5: str = ""
+    #: money per 1.0 of price movement, per 1.0 lot. GC 100, ES 50, NQ 20
+    value_per_point: float = 0.0
+    #: bar files for the backtest; falls back to `backtest.dbn_paths`
+    data: List[str] = field(default_factory=list)
+    #: SL/TP cross as distances, not levels — see the class docstring
+    translate_levels: bool = True
+
+    # --- optional contract detail. MT5 overrides all of these when live. ---
+    digits: Optional[int] = None
+    point: Optional[float] = None
+    tick_size: Optional[float] = None
+    volume_min: Optional[float] = None
+    volume_max: Optional[float] = None
+    volume_step: Optional[float] = None
+    currency: str = "USD"
+    #: per-instrument Databento overrides; blank means "use the shared block"
+    dataset: str = ""
+    stype_in: str = ""
+    contract_mode: str = ""
+    contract_symbol: str = ""
+
+    def spec(self, base: "SymbolSpec") -> "SymbolSpec":
+        """This instrument's contract spec, starting from the shared defaults."""
+        import copy as _copy
+        out = _copy.deepcopy(base)
+        out.name = self.mt5 or self.signal or self.name or out.name
+        if self.value_per_point:
+            out.value_per_price_unit = float(self.value_per_point)
+        for attr in ("digits", "point", "tick_size",
+                     "volume_min", "volume_max", "volume_step"):
+            value = getattr(self, attr)
+            if value is not None:
+                setattr(out, attr, value)
+        if self.currency:
+            out.currency = self.currency
+        return out
+
+
+def _next_magic(cfg) -> int:
+    """The next automatic magic number, in declaration order.
+
+    Every session needs its OWN magic so MetaTrader can tell their positions
+    apart — the magic is the only tag that survives on the broker's side.
+    Inheriting one magic from the defaults would make all sessions
+    indistinguishable in the terminal, in the deal history and in any manual
+    clean-up.
+
+    A session that names its own magic keeps it; the rest get base+1, base+2 ...
+    in declaration order, which is stable across runs so a restart re-attaches
+    to the same positions. Adding a session in the MIDDLE of the file therefore
+    shifts the ones after it — set `magic:` explicitly on anything already
+    trading live if you plan to reorder.
+    """
+    return int(cfg.strategy.magic) + len(cfg.sessions) + 1
+
+
+def _merge_session(base: Dict[str, Any], base_news: "NewsConfig", label: str,
+                   sdata: Dict[str, Any],
+                   base_engine_options: Optional[Dict[str, Any]] = None
+                   ) -> Dict[str, Any]:
+    """One level of session inheritance: `base` overridden by `sdata`.
+
+    Called TWICE when a session declares an instrument matrix — once for
+    defaults -> row, once for row -> cell — so three-level inheritance cannot
+    drift from the two-level behaviour every existing config relies on.
+
+    `news` and `engine_options` are merged member by member rather than
+    replaced; everything else is a plain override. `base_engine_options` exists
+    because the row's merged options live outside `base` on the second pass.
+    """
+    import copy as _copy
+
+    sdata = dict(sdata)
+    merged = dict(base)
+
+    # News is merged category by category, never replaced. A session that names
+    # one category must not silently drop the dates of the other seven — it
+    # states what differs, and inherits the rest. Dates almost always stay
+    # shared (the calendar is the calendar); it is usually only the mode that
+    # varies per session.
+    override = sdata.pop("news", None)
+    if override is None:
+        merged["news"] = _copy.deepcopy(base_news)
+    else:
+        if not isinstance(override, dict):
+            raise ValueError(
+                f"session '{label}': news must be a mapping of "
+                f"category -> {{mode, dates}}")
+        unknown_cat = set(override) - set(NEWS_CATEGORIES)
+        if unknown_cat:
+            raise ValueError(
+                f"session '{label}': unknown news categor(y/ies) "
+                f"{sorted(unknown_cat)}. Valid keys: {sorted(NEWS_CATEGORIES)}")
+        cats = {}
+        for ckey, _clabel, basecat in base_news.items():
+            ov = override.get(ckey) or {}
+            if not isinstance(ov, dict):
+                raise ValueError(
+                    f"session '{label}': news.{ckey} must have "
+                    f"'mode' and/or 'dates'")
+            bad = set(ov) - {"mode", "dates"}
+            if bad:
+                raise ValueError(
+                    f"session '{label}': news.{ckey} has unknown "
+                    f"key(s) {sorted(bad)} (use mode / dates)")
+            cats[ckey] = NewsCategory(mode=ov.get("mode", basecat.mode),
+                                      dates=ov.get("dates", basecat.dates))
+        merged["news"] = NewsConfig(**cats)
+
+    # `engine_options` is merged OPTION BY OPTION, for the same reason `news` is
+    # merged category by category: a session that states one option must
+    # override that one option, not silently discard the others.
+    #
+    #   defaults:  engine_options: {sl_range_mult: 0.5, max_trades_per_session: 2}
+    #   sessions:
+    #     london:  engine_options: {sl_range_mult: 1.5}
+    #
+    # London wants a wider stop and everything else as before. Replacing the
+    # whole dict would drop the cap back to the engine's own default, and
+    # nothing would say so — the run would simply take a different number of
+    # trades than the config appears to ask for.
+    #
+    # Options are inherited only when the session runs the SAME engine as its
+    # base. One that names a different engine starts from an empty dict: the
+    # inherited options are written in another strategy's vocabulary, and
+    # handing them over would either be rejected as unknown or — worse — happen
+    # to share a name and mean something else.
+    inherited_options = (base_engine_options if base_engine_options is not None
+                         else base.get("engine_options"))
+    session_engine = str(sdata.get("engine")
+                         or base.get("engine") or "orb").strip().lower()
+    base_engine = str(base.get("engine") or "orb").strip().lower()
+    session_options = sdata.pop("engine_options", None)
+    if session_options is not None:
+        if not isinstance(session_options, dict):
+            raise ValueError(
+                f"Session '{label}': engine_options must be a mapping of "
+                f"option names to values (got "
+                f"{type(session_options).__name__}).")
+        inherited = (dict(inherited_options or {})
+                     if session_engine == base_engine else {})
+        inherited.update(session_options)
+        merged["engine_options"] = inherited
+    elif session_engine != base_engine:
+        merged["engine_options"] = {}
+    elif inherited_options is not None:
+        merged["engine_options"] = dict(inherited_options)
+
+    merged.update(sdata)
+    return merged
+
+
+@dataclass
 class AppConfig:
     # `strategy` is the BASE rule set. With no `sessions:` block it is the one
     # and only session, so every existing single-session config keeps working
@@ -365,12 +550,48 @@ class AppConfig:
     databento: DatabentoConfig = field(default_factory=DatabentoConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     mt5: MT5Config = field(default_factory=MT5Config)
+    #: name -> instrument. EMPTY means the single-instrument shape this system
+    #: started with: the `symbol` / `databento` / `mt5` blocks above ARE the
+    #: one instrument, and every session trades it. Adding entries here is what
+    #: turns the run multi-instrument; sessions then name one by key.
+    instruments: Dict[str, InstrumentConfig] = field(default_factory=dict)
 
     # broker/server clock: the EA's "server time"
     server_utc_offset_hours: Optional[float] = 0.0
     server_timezone: Optional[str] = None     # e.g. "Europe/Athens"; overrides offset
 
     # ---------------------------------------------------------------
+    def select_instruments(self, wanted) -> None:
+        """Trade only these instruments this run; disable the other sessions.
+
+        `--instruments gc,es` on a config that declares four. Naming one that
+        is not declared is an error, not a silent empty run — the usual
+        symptom of a typo would otherwise be a backtest that quietly does
+        nothing at all.
+        """
+        if not wanted:
+            return
+        if isinstance(wanted, str):
+            wanted = [w.strip() for w in wanted.split(",") if w.strip()]
+        wanted = [str(w).strip() for w in wanted if str(w).strip()]
+        if not wanted:
+            return
+        unknown = [w for w in wanted if w not in self.instruments]
+        if unknown:
+            raise ValueError(
+                f"Unknown instrument(s): {sorted(unknown)}. Declared: "
+                f"{sorted(self.instruments)}.")
+        keep = set(wanted)
+        for session in self.sessions.values():
+            if session.instrument and session.instrument not in keep:
+                session.enabled = False
+        self.instruments = {k: v for k, v in self.instruments.items()
+                            if k in keep}
+        if not self.enabled_sessions():
+            raise ValueError(
+                f"No sessions left after selecting {sorted(keep)} — none of "
+                f"the enabled sessions trades those instruments.")
+
     def enabled_sessions(self) -> List[StrategyConfig]:
         """Every session that is switched ON, in declaration order.
 
@@ -379,7 +600,8 @@ class AppConfig:
         """
         return [s for s in self.sessions.values() if s.enabled]
 
-    def use_single_session(self, name: str = "MAIN") -> "StrategyConfig":
+    def use_single_session(self, name: str = "MAIN",
+                           instrument: Optional[str] = None) -> "StrategyConfig":
         """Collapse this config to ONE session driven by `strategy`.
 
         Tools that generate their own windows — the permutation matrix, the
@@ -393,9 +615,24 @@ class AppConfig:
         returned object IS the one session that will run, so mutating it is
         guaranteed to take effect. Always call it before mutating
         `cfg.strategy` in a tool.
+
+        `instrument` names which market the generated session trades. Left None
+        it inherits from the first session the file had enabled — the one this
+        generated session stands in for — because `cfg.strategy` is the shared
+        DEFAULTS block and carries no instrument of its own. Without that
+        every research tool (the matrix, the sweeps, the golden master, the
+        source verifier) would break the moment a config declared more than one
+        instrument, since a session must then name one.
         """
+        if instrument is None:
+            instrument = (self.strategy.instrument
+                          or next((x.instrument for x in self.enabled_sessions()
+                                   if x.instrument), "")
+                          or next((x.instrument for x in self.sessions.values()
+                                   if x.instrument), ""))
         self.strategy.name = name
         self.strategy.enabled = True
+        self.strategy.instrument = instrument or ""
         self.sessions = {name: self.strategy}
         return self.strategy
 
@@ -416,6 +653,30 @@ class AppConfig:
                 "Set enabled: true on at least one session.")
         for s in active:
             s.validate()
+        # Instrument references first: they apply however many sessions there
+        # are, and a typo here silently trades nothing at all.
+        if self.instruments:
+            # With exactly ONE instrument declared there is nothing to choose,
+            # so a session need not repeat it — every config written before
+            # instruments existed keeps working by adding four lines and
+            # nothing else. Ambiguity only starts at two.
+            only = (next(iter(self.instruments))
+                    if len(self.instruments) == 1 else "")
+            for s in active:
+                if not s.instrument and only:
+                    s.instrument = only
+                if not s.instrument:
+                    raise ValueError(
+                        f"Session '{s.name}' has no `instrument:`. With "
+                        f"{len(self.instruments)} instruments declared each "
+                        f"session must say which one it trades. Choose from "
+                        f"{sorted(self.instruments)}.")
+                if s.instrument not in self.instruments:
+                    raise ValueError(
+                        f"Session '{s.name}' names instrument "
+                        f"'{s.instrument}', which is not defined. Declared "
+                        f"instruments: {sorted(self.instruments)}.")
+
         if len(active) == 1:
             return
         # more than one session: each must hand over cleanly to the next
@@ -445,15 +706,27 @@ class AppConfig:
                     f"set a different magic on each session.")
             seen[s.magic] = s.name
 
+        # Overlap is only a problem WITHIN one instrument. The rule exists
+        # because the broker holds one position per instrument, so two sessions
+        # sharing a clock would fight over the same slot — the second would
+        # simply be refused. Across instruments there is no conflict at all:
+        # GC New York and ES New York are the same hours by definition, and
+        # refusing that would make multi-instrument trading impossible.
         for i, a in enumerate(active):
             for b in active[i + 1:]:
+                if (a.instrument or "") != (b.instrument or ""):
+                    continue
                 if a.overlaps(b):
+                    where = (f" on instrument '{a.instrument}'"
+                             if a.instrument else "")
                     raise ValueError(
                         f"Sessions '{a.name}' ({a.range_start}-{a.stop_time}) and "
-                        f"'{b.name}' ({b.range_start}-{b.stop_time}) overlap. "
-                        f"Enabled sessions must not share any part of the clock — "
-                        f"each one has to be flat before the next opens. Adjust a "
-                        f"stop_time or a range_start, or disable one of them.")
+                        f"'{b.name}' ({b.range_start}-{b.stop_time}) overlap"
+                        f"{where}. Two sessions on the SAME instrument must not "
+                        f"share any part of the clock — one has to be flat "
+                        f"before the next opens. Adjust a stop_time or a "
+                        f"range_start, disable one, or put them on different "
+                        f"instruments.")
 
     # ---------------------------------------------------------------
     @staticmethod
@@ -541,7 +814,35 @@ class AppConfig:
                 raise ValueError(f"Unknown option(s) in '{key}': {sorted(unknown)}")
             return cls(**data)
 
+        # --- instruments -------------------------------------------------
+        # A mapping of key -> {signal, mt5, value_per_point, data}. Absent
+        # means the single-instrument shape, which is every config written
+        # before this existed, so nothing has to be added to keep working.
+        instruments: Dict[str, InstrumentConfig] = {}
+        raw_instruments = raw.pop("instruments", None) or {}
+        if not isinstance(raw_instruments, dict):
+            raise ValueError("`instruments:` must be a mapping of "
+                             "name -> {signal, mt5, value_per_point, data}")
+        allowed = {f.name for f in dc_fields(InstrumentConfig)}
+        for key, block in raw_instruments.items():
+            block = dict(block or {})
+            unknown = set(block) - allowed
+            if unknown:
+                raise ValueError(
+                    f"Unknown key(s) in instrument '{key}': {sorted(unknown)}. "
+                    f"Valid: {sorted(allowed - {'name'})}")
+            block.pop("name", None)
+            inst = InstrumentConfig(name=str(key), **block)
+            if not inst.mt5 and not inst.signal:
+                raise ValueError(
+                    f"Instrument '{key}' needs at least `mt5:` (the symbol in "
+                    f"your terminal); add `signal:` too when the data comes "
+                    f"from a different instrument, e.g. signal: \"ES.FUT\", "
+                    f"mt5: \"US500\".")
+            instruments[str(key)] = inst
+
         cfg = AppConfig(
+            instruments=instruments,
             strategy=sub(StrategyConfig, "strategy"),
             symbol=sub(SymbolSpec, "symbol"),
             databento=sub(DatabentoConfig, "databento"),
@@ -572,6 +873,24 @@ class AppConfig:
             base.pop("news", None)               # NewsConfig is rebuilt below
             for sname, sdata in raw_sessions.items():
                 sdata = dict(sdata or {})
+                # A session may spread across SEVERAL instruments. The nested
+                # block is the (session x instrument) matrix: the row states
+                # what the window shares, each cell states what that one symbol
+                # does differently, and each cell switches on and off alone.
+                #
+                #   new_york:
+                #     range_start: "09:30"     <- shared by every symbol below
+                #     risk_reward: 4.0
+                #     instruments:
+                #       gc: {enabled: true,  lots: 1.0}
+                #       es: {enabled: true,  lots: 39.48, risk_reward: 2.0}
+                #       nq: {enabled: false}
+                #
+                # Each cell becomes one ordinary session named
+                # `<session>_<instrument>`, so nothing downstream — the engine,
+                # the broker, the report — learns a new concept. A session
+                # WITHOUT the block is left exactly as it was.
+                cells = sdata.pop("instruments", None)
                 unknown = set(sdata) - set(StrategyConfig.__dataclass_fields__)
                 if unknown:
                     raise ValueError(
@@ -589,94 +908,77 @@ class AppConfig:
                         f"Every session must state its own range_start, "
                         f"range_end and stop_time — these are never inherited, "
                         f"so the window is always visible in the session.")
-                merged = dict(base)
-                # News is merged category by category, never replaced. A session
-                # that names one category must not silently drop the dates of
-                # the other seven — it states what differs, and inherits the
-                # rest. Dates almost always stay shared (the calendar is the
-                # calendar); it is usually only the mode that varies per session.
-                import copy as _copy
-                base_news = cfg.strategy.news
-                override = sdata.pop("news", None)
-                if override is None:
-                    merged["news"] = _copy.deepcopy(base_news)
-                else:
-                    if not isinstance(override, dict):
+
+                if cells is None:
+                    merged = _merge_session(base, cfg.strategy.news, sname, sdata)
+                    merged["name"] = sdata.get("name") or str(sname)
+                    if "magic" not in sdata:
+                        merged["magic"] = _next_magic(cfg)
+                    cfg.sessions[str(sname)] = sub(StrategyConfig, "strategy",
+                                                   merged)
+                    continue
+
+                # ---- the (session x instrument) matrix -----------------
+                if not isinstance(cells, dict) or not cells:
+                    raise ValueError(
+                        f"Session '{sname}': `instruments` must be a mapping "
+                        f"of instrument name -> its settings for this session, "
+                        f"e.g.\n"
+                        f"  {sname}:\n    instruments:\n"
+                        f"      gc: {{enabled: true, lots: 1.0}}\n"
+                        f"      es: {{enabled: false}}")
+
+                # The row is merged FIRST, so a cell inherits the window and
+                # any setting the row shares. Two passes through the same
+                # merge, so three-level inheritance (defaults -> row -> cell)
+                # cannot drift from two-level.
+                row = _merge_session(base, cfg.strategy.news, sname, sdata)
+                row_enabled = bool(row.get("enabled", True))
+                row_news = row["news"]
+                row_engine_options = row.get("engine_options")
+
+                for iname, cell in cells.items():
+                    cell = dict(cell or {})
+                    if "instruments" in cell:
                         raise ValueError(
-                            f"session '{sname}': news must be a mapping of "
-                            f"category -> {{mode, dates}}")
-                    unknown_cat = set(override) - set(NEWS_CATEGORIES)
-                    if unknown_cat:
+                            f"Session '{sname}', instrument '{iname}': "
+                            f"`instruments` cannot nest inside a cell — the "
+                            f"cell already IS one instrument.")
+                    stated = str(cell.pop("instrument", "") or "").strip()
+                    if stated and stated != str(iname):
                         raise ValueError(
-                            f"session '{sname}': unknown news categor(y/ies) "
-                            f"{sorted(unknown_cat)}. "
-                            f"Valid keys: {sorted(NEWS_CATEGORIES)}")
-                    cats = {}
-                    for ckey, _clabel, basecat in base_news.items():
-                        ov = override.get(ckey) or {}
-                        if not isinstance(ov, dict):
-                            raise ValueError(
-                                f"session '{sname}': news.{ckey} must have "
-                                f"'mode' and/or 'dates'")
-                        bad = set(ov) - {"mode", "dates"}
-                        if bad:
-                            raise ValueError(
-                                f"session '{sname}': news.{ckey} has unknown "
-                                f"key(s) {sorted(bad)} (use mode / dates)")
-                        cats[ckey] = NewsCategory(
-                            mode=ov.get("mode", basecat.mode),
-                            dates=ov.get("dates", basecat.dates))
-                    merged["news"] = NewsConfig(**cats)
-                # `engine_options` is merged OPTION BY OPTION, for the same
-                # reason `news` is merged category by category: a session that
-                # states one option must override that one option, not silently
-                # discard the others.
-                #
-                #   defaults:  engine_options: {sl_range_mult: 0.5,
-                #                               max_trades_per_session: 2}
-                #   sessions:
-                #     london:  engine_options: {sl_range_mult: 1.5}
-                #
-                # London wants a wider stop and everything else as before.
-                # Replacing the whole dict would drop the cap back to the
-                # engine's own default, and nothing would say so — the run
-                # would simply take a different number of trades than the
-                # config appears to ask for.
-                # Options are inherited only when the session runs the SAME
-                # engine as the defaults. A session that names a different
-                # engine starts from an empty dict: the inherited options are
-                # written in another strategy's vocabulary, and handing them
-                # over would either be rejected as unknown or — worse — happen
-                # to share a name and mean something else.
-                session_engine = str(sdata.get("engine")
-                                     or base.get("engine") or "orb").strip().lower()
-                base_engine = str(base.get("engine") or "orb").strip().lower()
-                session_options = sdata.pop("engine_options", None)
-                if session_options is not None:
-                    if not isinstance(session_options, dict):
+                            f"Session '{sname}', instrument '{iname}': the "
+                            f"cell also says `instrument: {stated}`. The key "
+                            f"names the instrument — remove the inner line, or "
+                            f"rename the key.")
+                    unknown = set(cell) - set(StrategyConfig.__dataclass_fields__)
+                    if unknown:
                         raise ValueError(
-                            f"Session '{sname}': engine_options must be a "
-                            f"mapping of option names to values (got "
-                            f"{type(session_options).__name__}).")
-                    inherited = (dict(base.get("engine_options") or {})
-                                 if session_engine == base_engine else {})
-                    inherited.update(session_options)
-                    merged["engine_options"] = inherited
-                elif session_engine != base_engine:
-                    merged["engine_options"] = {}
-                merged.update(sdata)
-                merged["name"] = sdata.get("name") or str(sname)
-                # Every session needs its OWN magic number so MetaTrader can
-                # tell their positions apart — the magic is the only tag that
-                # survives on the broker's side. Inheriting one magic from the
-                # defaults would make all sessions indistinguishable in the
-                # terminal, in the deal history and in any manual clean-up.
-                # A session that names its own magic keeps it; the rest get
-                # base+1, base+2 ... in declaration order, which is stable
-                # across runs so a restart re-attaches to the same positions.
-                if "magic" not in sdata:
-                    merged["magic"] = int(cfg.strategy.magic) + len(cfg.sessions) + 1
-                cfg.sessions[str(sname)] = sub(StrategyConfig, "strategy", merged)
+                            f"Unknown option(s) in session '{sname}', "
+                            f"instrument '{iname}': {sorted(unknown)}")
+
+                    # the row becomes the base for its own cells
+                    row_base = dict(row)
+                    row_base.pop("news", None)
+                    cell_merged = _merge_session(row_base, row_news,
+                                                 f"{sname}.{iname}", cell,
+                                                 base_engine_options=row_engine_options)
+                    key = str(cell.get("name") or f"{sname}_{iname}")
+                    cell_merged["name"] = key
+                    cell_merged["instrument"] = str(iname)
+                    # A cell trades only if BOTH switches are on: turning the
+                    # row off must silence every symbol under it, and turning
+                    # one cell off must not disturb its neighbours.
+                    cell_merged["enabled"] = row_enabled and bool(
+                        cell.get("enabled", True))
+                    if "magic" not in cell:
+                        cell_merged["magic"] = _next_magic(cfg)
+                    if key in cfg.sessions:
+                        raise ValueError(
+                            f"Two sessions are both called '{key}'. Give one "
+                            f"of them its own `name:`.")
+                    cfg.sessions[key] = sub(StrategyConfig, "strategy",
+                                            cell_merged)
 
         cfg.validate_sessions()
         return cfg

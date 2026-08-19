@@ -17,6 +17,10 @@ class Bar:
     low: float
     close: float
     volume: float = 0.0
+    #: which instrument this bar describes. Empty means "the only one", which
+    #: is what every single-instrument run produces, so nothing that predates
+    #: multi-instrument support has to change. `MultiEngine` routes on it.
+    instrument: str = ""
 
     def end_time(self, tf_seconds: int) -> datetime:
         return self.time + timedelta(seconds=tf_seconds)

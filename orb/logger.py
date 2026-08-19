@@ -42,7 +42,10 @@ def parse_log_level(value) -> int:
 
 #: width of the session column. Long enough for "new_york"; anything longer is
 #: truncated rather than allowed to break the alignment.
-SOURCE_WIDTH = 9
+#: how much room the journal gives a session name. Wide enough for the
+#: `<window>_<instrument>` names a session matrix produces — `new_york_gc` is
+#: 11 — so the column no longer truncates the part that says which symbol.
+SOURCE_WIDTH = 12
 
 
 class RbeaLogger:

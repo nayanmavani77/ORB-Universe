@@ -92,12 +92,25 @@ def _breakout(base: AppConfig, session: str, tf: str, orb: int, rr: float,
     return cfg
 
 
-def _multi(base: AppConfig, tf: str = "M5"):
-    """All three sessions at once — the fan-out path, the one most at risk."""
+def _multi(base: AppConfig, tf: str = "M5", instrument: str = "gc"):
+    """All three WINDOWS at once, on one instrument — the fan-out path, the one
+    most at risk.
+
+    Scoped to a single instrument on purpose. The bars here come from
+    `load_dbn_bars`, which loads one file and cannot tag what it loads, so a
+    run spanning several instruments would have no way to route them. It is
+    also what the case has always meant: Asia, London and New York competing
+    for one position slot on one account.
+
+    Once a config declares a (session x instrument) matrix, "every session" is
+    every CELL — three windows times three symbols. Enabling all nine would
+    change the case into something else and quietly need two data files it was
+    never given.
+    """
     import copy
     cfg = copy.deepcopy(base)
     for name, sess in cfg.sessions.items():
-        sess.enabled = True
+        sess.enabled = (sess.instrument or instrument) == instrument
         sess.signal_timeframe = tf
         sess.log_level = "none"
     cfg.validate_sessions()

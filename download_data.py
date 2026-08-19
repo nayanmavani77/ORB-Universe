@@ -28,6 +28,44 @@ from orb.config import ENV_FILE, AppConfig, missing_secrets
 from orb.data.dbn import download_history, list_contracts
 
 
+def show_cost(d) -> int:
+    """What this request would cost, before committing to it.
+
+    Databento bills historical data by volume, so a request is worth pricing
+    before it is sent — especially with `stype_in: parent`, which returns EVERY
+    contract month plus every calendar spread, not just the front month.
+    """
+    try:
+        import databento as db
+    except ImportError:
+        print("pip install databento", file=sys.stderr)
+        return 2
+
+    client = db.Historical(d.api_key)
+    args = dict(dataset=d.dataset, symbols=d.symbols, schema=d.schema,
+                stype_in=d.stype_in, start=d.start, end=d.end)
+    print(f"  {d.dataset}  {d.symbols}  {d.schema}  "
+          f"{d.stype_in}  {d.start} .. {d.end}")
+    try:
+        size = client.metadata.get_billable_size(**args)
+        print(f"  billable size   {size:,} bytes ({size / 1e6:,.1f} MB)")
+    except Exception as exc:
+        print(f"  billable size   unavailable ({exc!r})")
+    try:
+        count = client.metadata.get_record_count(**args)
+        print(f"  records         {count:,}")
+    except Exception as exc:
+        print(f"  records         unavailable ({exc!r})")
+    try:
+        cost = client.metadata.get_cost(**args)
+        print(f"  COST            ${cost:,.2f}")
+    except Exception as exc:
+        print(f"  cost            unavailable ({exc!r})")
+    print("\n  Nothing was downloaded and nothing was billed. Drop --cost to "
+          "run it for real.")
+    return 0
+
+
 def main(argv=None) -> int:
     p = build_parser("download_data.py", "Databento history downloader",
                      include=("Data source (Databento)",))
@@ -35,6 +73,13 @@ def main(argv=None) -> int:
                    metavar="PATH=VALUE",
                    help="override any config field directly (repeatable), "
                         "e.g. --set databento.schema=ohlcv-1s")
+    p.add_argument("--cost", action="store_true",
+                   help="ask Databento what this request would cost and how "
+                        "many records it would return, then stop. Nothing is "
+                        "downloaded and nothing is billed. Worth doing before "
+                        "any request measured in months — a year of "
+                        "parent-symbology 1-minute data is a different order "
+                        "of size from a week of it.")
     p.add_argument("--list-contracts", action="store_true",
                    help="list the contracts found in the configured data files "
                         "with their bar counts and volume, then stop. Nothing "
@@ -79,6 +124,9 @@ def main(argv=None) -> int:
               f"(`--list-contracts` reads local files and needs no key.)",
               file=sys.stderr)
         return 2
+
+    if a.cost:
+        return show_cost(d)
 
     print(f"Downloading {d.dataset} {d.symbols} {d.schema} "
           f"{d.start} .. {d.end} ...")

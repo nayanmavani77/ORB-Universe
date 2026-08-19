@@ -41,6 +41,16 @@ from orb.live_trader import LiveTrader                     # noqa: E402
 from orb.logger import RbeaLogger                          # noqa: E402
 from orb.runconfig import RunConfig                        # noqa: E402
 
+def in_window(session, window: str) -> bool:
+    """Does this session belong to that WINDOW?
+
+    A window that trades several instruments expands to one session per cell —
+    `asia_gc`, `asia_es` — so a test meaning "the Asia window" cannot match on
+    the bare name any more. The gc cell is the one these tests drive, because
+    their synthetic bars are gold's.
+    """
+    name = session.name or ""
+    return name == window or name.startswith(window + "_")
 BASE = datetime(2026, 8, 18)
 
 
@@ -89,7 +99,7 @@ def live_through_window(engine, session, first_minute, n_bars, tf=None):
     """Run the live loop from before a range window to well after it."""
     cfg = RunConfig.load(engine).app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == session)
+        s.enabled = in_window(s, session) and (s.instrument or "gc") == "gc"
         if s.enabled and tf:
             s.signal_timeframe = tf
     bars = [m1(first_minute + i, 4455 + (i % 5)) for i in range(n_bars)]
@@ -145,7 +155,7 @@ def test_a_genuinely_empty_window_is_still_skipped():
     correctly reported as skipped."""
     cfg = RunConfig.load("orb_reverse").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "london")
+        s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
     # bars only AFTER the window: 03:20 onward, nothing inside 03:00-03:15
     bars = [m1(200 + i, 4455 + (i % 5)) for i in range(40)]
     trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
@@ -165,7 +175,7 @@ def start_inside_the_window():
     so 02:58..03:06 is covered by neither, and that is half the window."""
     cfg = RunConfig.load("orb_reverse").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "london")
+        s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
     warm = [m1(160 + i, 4450 + (i % 7)) for i in range(18)]    # 02:40 .. 02:57
     live = [m1(187 + i, 4470 + (i % 3)) for i in range(30)]    # 03:07 .. 03:36
     trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
@@ -210,7 +220,7 @@ def test_backtest_path_is_unchanged():
     from orb.backtest import run_backtest
     cfg = RunConfig.load("orb").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "asia")
+        s.enabled = in_window(s, "asia") and (s.instrument or "gc") == "gc"
     bars = [m1(19 * 60 - 5 + i, 4455 + (i % 5)) for i in range(120)]
     result = run_backtest(cfg, bars, logger=RbeaLogger(level=0))
     assert result.bars_processed == len(bars)

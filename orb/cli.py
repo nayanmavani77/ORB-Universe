@@ -57,6 +57,10 @@ G_NEWS = "News categories"
 
 SPEC: List[Opt] = [
     # ---------------- session ----------------
+    Opt(("--instrument",), "strategy.instrument", "str",
+        "Which instrument this session trades — a key in the `instruments:` "
+        "block, e.g. gc or es. Blank means the run's single instrument.",
+        G_SESSION, metavar="NAME"),
     Opt(("--engine",), "strategy.engine", "str",
         "Which strategy engine this session runs — a name registered in "
         "orb/engines/, e.g. orb or orb_reverse. Each session may use a "
@@ -255,7 +259,12 @@ GROUP_ORDER = [G_SESSION, G_STRAT, G_NEWS, G_SYMBOL, G_DATA, G_COST, G_OUT, G_LI
 #                      session runs, so there is no fixed set of flags to
 #                      generate. Driven by
 #                      --set sessions.<name>.engine_options.<option>=<value>
-NO_FLAG = {"sessions", "strategy.name", "strategy.enabled",
+#   instruments        a mapping of name -> {signal, mt5, value_per_point,
+#                      data}. Like `sessions`, its shape is defined by the
+#                      user, so there is no fixed set of flags to generate.
+#                      Edit the engine's config.yaml, or use
+#                      --set instruments.<name>.<field>=<value>
+NO_FLAG = {"sessions", "instruments", "strategy.name", "strategy.enabled",
            "strategy.engine_options"}
 
 

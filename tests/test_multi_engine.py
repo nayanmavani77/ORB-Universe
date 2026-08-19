@@ -69,6 +69,9 @@ def _session(base, name, market, engine, options=None, magic=None):
     s = copy.deepcopy(base.strategy)
     start, end, stop = range_window(market, 15)
     s.name, s.enabled = name, True
+    # With more than one instrument declared, a session must say which it
+    # trades. These cases are all gold, on gold's bar file.
+    s.instrument = "gc"
     s.engine = engine
     opts = dict(options or {})
     # the cap is a SESSION field, never an engine option — engines reject it
@@ -97,6 +100,20 @@ def _key(t):
             round(t.entry_price, 6), round(t.sl, 6), round(t.tp, 6),
             round(t.net_profit, 6))
 
+
+def cell(app, window: str, instrument: str = "gc"):
+    """One (window x instrument) cell of a config's session matrix.
+
+    A window that trades several instruments expands to one session per cell —
+    `asia_gc`, `asia_es` — so a test meaning "the Asia window" cannot index by
+    the bare name any more.
+    """
+    for s in app.sessions.values():
+        if (s.name == window or s.name.startswith(window + "_")) \
+                and (s.instrument or instrument) == instrument:
+            return s
+    raise KeyError(f"no '{window}' session on '{instrument}' in "
+                   f"{list(app.sessions)}")
 
 REVERSAL_OPTS = {"sl_range_mult": 0.75, "direction": "reverse",
                  "max_trades_per_session": 2}
@@ -445,11 +462,11 @@ def test_merged_run_needs_no_parent_config():
     account. Sessions come from each engine's own file."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
-    configs[0].app.sessions["asia"].enabled = True
-    configs[0].app.sessions["new_york"].enabled = False
+    cell(configs[0].app, "asia").enabled = True
+    cell(configs[0].app, "new_york").enabled = False
     app = merge(configs)
     engines = {s.name: s.engine for s in app.enabled_sessions()}
-    assert engines == {"asia": "orb", "london": "orb_reverse"}
+    assert engines == {"asia_gc": "orb", "london_gc": "orb_reverse"}
     # one account, one instrument — taken from configs that agree
     assert app.symbol.name == configs[0].app.symbol.name
     assert app.backtest.initial_balance == configs[0].app.backtest.initial_balance
@@ -459,8 +476,8 @@ def test_merged_run_trades_both_engines(base, bars):
     """Not just configured — actually traded, by two different strategies."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
-    configs[0].app.sessions["asia"].enabled = True
-    configs[0].app.sessions["new_york"].enabled = False
+    cell(configs[0].app, "asia").enabled = True
+    cell(configs[0].app, "new_york").enabled = False
     app = merge(configs)
     app.backtest.dbn_paths = [DATA]
     for session in app.enabled_sessions():
@@ -468,7 +485,7 @@ def test_merged_run_trades_both_engines(base, bars):
     app.strategy.log_level = "none"
     res = run_backtest(app, bars, RbeaLogger(level=0))
     traded = {t.session_name for t in res.trades}
-    assert traded == {"asia", "london"}, f"only {traded} traded"
+    assert traded == {"asia_gc", "london_gc"}, f"only {traded} traded"
 
 
 def test_merged_run_rejects_disagreeing_configs():
@@ -491,10 +508,9 @@ def test_merged_run_rejects_a_magic_collision():
     broker once both engines hold positions."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
-    configs[0].app.sessions["asia"].enabled = True
-    configs[0].app.sessions["new_york"].enabled = False
-    configs[1].app.sessions["london"].magic = \
-        configs[0].app.sessions["asia"].magic
+    cell(configs[0].app, "asia").enabled = True
+    cell(configs[0].app, "new_york").enabled = False
+    cell(configs[1].app, "london").magic = cell(configs[0].app, "asia").magic
     with pytest.raises(SystemExit) as exc:
         merge(configs)
     assert "magic" in str(exc.value)
@@ -506,13 +522,14 @@ def test_a_session_can_name_a_different_engine_in_one_file():
     from orb.runconfig import RunConfig
     rc = RunConfig.load("orb")
     app = copy.deepcopy(rc.app)
-    app.sessions["asia"].enabled = True
-    app.sessions["asia"].engine = "orb_reverse"
-    app.sessions["asia"].engine_options = {"sl_range_mult": 0.5}
+    asia = cell(app, "asia")
+    asia.enabled = True
+    asia.engine = "orb_reverse"
+    asia.engine_options = {"sl_range_mult": 0.5}
     app.validate_sessions()
     engines = {s.name: s.engine for s in app.enabled_sessions()}
-    assert engines["asia"] == "orb_reverse"
-    assert engines["new_york"] == "orb"
+    assert engines[asia.name] == "orb_reverse"
+    assert engines[cell(app, "new_york").name] == "orb"
 
 
 # ==========================================================================
@@ -662,7 +679,8 @@ def test_the_shipped_config_actually_caps_the_session(base, bars):
         session.log_level = "none"
     app.strategy.log_level = "none"
     asked = {s.name: s.max_trades_per_session for s in app.enabled_sessions()}
-    assert asked.get("london") == 3, "the config no longer asks for a cap of 3"
+    assert asked.get("london_gc") == 3, \
+        "the config no longer asks for a cap of 3"
     res = run_backtest(app, bars, RbeaLogger(level=0))
     taken = max(t.trade_no_in_session for t in res.trades)
     assert taken <= 3, f"the cap was not applied — {taken} trades in a session"

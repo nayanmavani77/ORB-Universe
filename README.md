@@ -100,6 +100,51 @@ symbol:
                                   # GC 100 | ES 50 | NQ 20 | CL 1000 | EURUSD 100000
 ```
 
+Those are the *defaults*. To trade more than one market, declare each in the
+`instruments:` block — four lines apiece — and point each session at one:
+
+```yaml
+instruments:
+  gc:
+    signal: "GC.FUT"              # where the signal comes from (Databento)
+    mt5:    "XAUUSDm"             # where it trades (your terminal)
+    value_per_point: 100.0        # money per 1.0 price move per 1 lot
+    data:   ["data/gc_1m_merged.parquet"]
+  es:
+    signal: "ES.FUT"
+    mt5:    "US500"
+    value_per_point: 50.0
+    data:   ["data/es_1m.parquet"]
+
+sessions:
+  new_york:                       # the WINDOW, shared by every symbol below
+    enabled: true
+    range_start: "09:30"
+    range_end:   "10:00"
+    stop_time:   "16:55"
+    instruments:                  # one CELL per symbol, each on/off alone
+      gc: {enabled: true,  lots: 1.0}
+      es: {enabled: true,  lots: 39.48, risk_reward: 2.0}
+      nq: {enabled: false, lots: 10.91}
+```
+
+A cell inherits **defaults -> row -> its own lines**, so one window can run
+several symbols on different settings, and the same symbol can run in several
+windows on different settings. Each cell becomes a session called
+`<window>_<symbol>` — `new_york_gc` — which is the name you will see in the
+journal and the report.
+
+Get `value_per_point` from your own terminal rather than guessing — it is the
+broker's contract size, not the CME's:
+`python tools/mt5_check.py --suggest US500,USTEC` prints a ready-to-paste block.
+
+Nothing else changes: backtest, sweep, report and live all follow the mapping.
+Pick what a run trades with `--instruments gc,es`, or omit it for everything
+declared. Two sessions on **different** instruments may share a clock window;
+two on the **same** instrument may not. Digits, tick size and volume limits are
+read from MT5 at run time and override whatever is set here. See
+`docs/COMMANDS.md` §0 and `ARCHITECTURE.md` → Instruments.
+
 The session clock is what makes `09:30` in the config mean the same `09:30` you
 mean. Databento timestamps are UTC; the engine shifts them into your session
 zone once, at ingest. Use `server_timezone` for a real market session (it
@@ -717,15 +762,20 @@ run on every poll; the breakout check runs on every completed timeframe bar.
   SL and TP therefore live on the broker's server and survive a disconnect,
   exactly as with the original EA.
 * On start, `--warmup-days` of history is pulled from Databento so the current
-  session's range can be built immediately after a restart.
+  session's range can be built immediately after a restart — once per
+  instrument, each from its own symbol.
 * Symbol digits, point, stop level and volume limits are read from MT5 and
-  override the `symbol:` block.
+  override the `symbol:` block — per instrument, so ES is priced as ES.
+* With several instruments there is **one feed per instrument**, each locked to
+  its own front month, and one position per instrument on one shared balance.
 
 Ctrl-C stops the EA and leaves open positions untouched, as `OnDeinit` does.
 
 **Check before trading:** the Databento instrument and the MT5 symbol must be
 the same market, and `server_utc_offset_hours` must match your MT5 server —
 otherwise the range window will be built at the wrong time of day.
+`python tools/mt5_check.py` verifies every instrument's symbol, and compares
+each one's `value_per_point` against what the terminal actually says.
 
 ---
 
@@ -767,11 +817,13 @@ Both properties are enforced by tests rather than by convention — see below.
 ```
 orb/                       the CORE — knows nothing about any strategy
   config.py                every MQL5 input as a dataclass, + .env loading
+                           — including `instruments:`, the market -> MT5 map
   timeutils.py             ParseHHMM / ParseDate / skip list / server clock
   logger.py                [RBEA] journal, level filtering, repeat suppression
   bars.py                  Bar, MT5-aligned resampler, history store
   engine.py                the OnTick sequence — the single source of truth
-  broker.py                Broker interface, SimBroker, MT5Broker
+  broker.py                Broker interface, SimBroker, MT5Broker,
+                           InstrumentView (one instrument's face of the account)
   backtest.py              backtest driver  (bars in, result out)
   live_trader.py           live driver      (feed in, orders out)
   report.py                statistics and the HTML report
@@ -779,7 +831,7 @@ orb/                       the CORE — knows nothing about any strategy
   registry.py              engine name -> strategy class
   runconfig.py             loads engine configs; merges them for a mixed run
   markets.py               session opens and stop times, defined once
-  outputs.py               backtest/<engine>/<run-name>/
+  outputs.py               backtest/<engine>/<run-name>/, named per instrument
   strategy.py              import shim — the class moved to engines/orb/
   data/dbn.py              DBN loader + history downloader
   data/live.py             Databento Live feed
@@ -829,7 +881,8 @@ python tests/test_cli.py              #  32 checks — CLI covers every setting
 python -m pytest tests/test_multi_engine.py tests/test_orb_reverse.py \
                 tests/test_live_feed.py tests/test_late_start.py \
                 tests/test_range_window.py tests/test_exit_journal.py \
-                tests/test_bar_timing.py tests/test_journal.py -q
+                tests/test_bar_timing.py tests/test_journal.py \
+                tests/test_instruments.py -q
 ```
 
 `golden_master.py check` is the one to run after ANY change to the engines: it
@@ -863,8 +916,17 @@ the front-month roll — one contract per day, forward only, never falling back
 to an expiring contract that briefly out-trades the new one — and the
 (timestamp, symbol) de-duplication that keeps simultaneous contracts alive.
 
+**`test_instruments`** covers the multi-market path: two instruments trading in
+one run, each valued with its own contract spec (the same 22-point move must
+earn exactly twice as much on gold as on ES), bars routed by tag so a gold bar
+cannot move an ES range, one position per instrument on a shared balance,
+untagged bars still adopted by a lone declared instrument, cross-instrument
+window overlap allowed while same-instrument overlap stays rejected,
+`--instruments` selection with a typo as a hard error, and a sweep running the
+whole grid once per instrument.
+
 **`test_cli`** is what makes "every setting is on the command line" true rather
-than merely claimed. It walks `AppConfig`, asserts each of the 55 fields has
+than merely claimed. It walks `AppConfig`, asserts each of the 77 fields has
 exactly one flag, drives every flag through the parser and checks the value
 actually lands on the right field, and regenerates `docs/CLI.md` to confirm the
 documentation still matches the code. Add a config option without a flag or a

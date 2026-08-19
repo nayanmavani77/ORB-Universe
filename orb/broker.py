@@ -32,6 +32,8 @@ class Position:
     magic: int = 0
     # bookkeeping used by the report
     session_name: str = ""
+    #: which instrument this position is on. "" for a single-instrument run.
+    instrument: str = ""
     session_start: Optional[datetime] = None
     range_high: float = 0.0
     range_low: float = 0.0
@@ -63,6 +65,8 @@ class ClosedTrade:
     range_mid: float
     trade_no_in_session: int
     r_multiple: float
+    #: which instrument the trade was on. Empty for a single-instrument run.
+    instrument: str = ""
 
 
 # ==========================================================================
@@ -83,16 +87,17 @@ class Broker(ABC):
         """SYMBOL_TRADE_STOPS_LEVEL * SYMBOL_POINT"""
         return self.spec.stops_level_points * self.spec.point
 
-    def normalize_lot(self, lot: float) -> float:
-        """MQL5 NormalizeLot()."""
-        step = self.spec.volume_step or 0.01
+    def normalize_lot(self, lot: float, instrument: str = "") -> float:
+        """MQL5 NormalizeLot(), against THIS instrument's volume steps."""
+        spec = self.spec_for(instrument)
+        step = spec.volume_step or 0.01
         lot = math.floor(lot / step) * step
-        lot = max(lot, self.spec.volume_min)
-        lot = min(lot, self.spec.volume_max)
+        lot = max(lot, spec.volume_min)
+        lot = min(lot, spec.volume_max)
         return round(lot, 2)
 
-    def normalize_price(self, price: float) -> float:
-        return round(price, self.spec.digits)
+    def normalize_price(self, price: float, instrument: str = "") -> float:
+        return round(price, self.spec_for(instrument).digits)
 
     # --- required interface ---------------------------------------------
     @abstractmethod
@@ -109,17 +114,41 @@ class Broker(ABC):
                     comment: str,
                     magic: int = 0) -> Tuple[bool, Optional[Position], str]: ...
 
+    # -- per-instrument access --------------------------------------------
+    # Defaults that make a single-instrument broker answer correctly without
+    # knowing instruments exist at all. `view()` below is how a session gets a
+    # broker bound to ITS instrument, so no strategy code takes an extra
+    # argument anywhere.
+    def spec_for(self, instrument: str = "") -> SymbolSpec:
+        return self.spec
+
+    def position_for(self, instrument: str = ""):
+        return getattr(self, "position", None)
+
+    def view(self, instrument: str = "") -> "Broker":
+        """This broker, bound to one instrument.
+
+        The strategy calls `broker.ask()`, `broker.positions_count()` and so on
+        with no arguments and must keep doing so — the trading rules are the
+        one thing that may not change. A view supplies the instrument on every
+        call, so one account can carry several instruments while each strategy
+        still believes it has a broker to itself.
+        """
+        if not instrument:
+            return self
+        return InstrumentView(self, instrument)
+
     @abstractmethod
     def modify(self, position: Position, sl: float, tp: float) -> Tuple[bool, str]: ...
 
     @abstractmethod
     def close_all(self, reason: str) -> None: ...
 
-    def price_for(self, is_buy: bool) -> float:
+    def price_for(self, is_buy: bool, instrument: str = "") -> float:
         """Where an order would actually FILL — the execution instrument."""
-        return self.ask() if is_buy else self.bid()
+        return self.ask(instrument) if is_buy else self.bid(instrument)
 
-    def reference_price(self, is_buy: bool) -> float:
+    def reference_price(self, is_buy: bool, instrument: str = "") -> float:
         """Where the SIGNAL was generated — the data-feed instrument.
 
         For a backtest, and for live trading on the same instrument the data
@@ -128,9 +157,10 @@ class Broker(ABC):
         deciding, spot XAUUSD executing), which is what `translate_levels`
         exists for.
         """
-        return self.price_for(is_buy)
+        return self.price_for(is_buy, instrument)
 
-    def trades_opened_since(self, magic: int, since: datetime):
+    def trades_opened_since(self, magic: int, since: datetime,
+                            instrument: str = ""):
         """How many positions this magic opened since `since`. None = unknown.
 
         Exists so a restart cannot reset `max_trades_per_session`. The counter
@@ -181,6 +211,85 @@ class Broker(ABC):
 
 
 # ==========================================================================
+class InstrumentView:
+    """One instrument's face of a shared account.
+
+    Every call the strategy makes — `ask()`, `positions_count()`,
+    `open_market(...)`, `digits` — is forwarded with this instrument attached.
+    That is what lets several instruments share one balance without a single
+    line of strategy code learning that instruments exist: `MultiEngine` hands
+    each session a view, and the session sees what looks like its own broker.
+
+    Anything not listed here falls through to the account broker unchanged, so
+    balance, trade list and equity curve stay shared and singular — which is
+    the point of a portfolio.
+    """
+
+    def __init__(self, broker: "Broker", instrument: str):
+        self._broker = broker
+        self.instrument = instrument
+
+    # --- prices, all scoped -------------------------------------------
+    def ask(self) -> float:
+        return self._broker.ask(self.instrument)
+
+    def bid(self) -> float:
+        return self._broker.bid(self.instrument)
+
+    def price_for(self, is_buy: bool) -> float:
+        return self._broker.price_for(is_buy, self.instrument)
+
+    def reference_price(self, is_buy: bool) -> float:
+        return self._broker.reference_price(is_buy, self.instrument)
+
+    def basis(self, is_buy: bool) -> float:
+        fn = getattr(self._broker, "basis", None)
+        return fn(is_buy, self.instrument) if callable(fn) else 0.0
+
+    # --- positions, all scoped ----------------------------------------
+    def positions_count(self) -> int:
+        return self._broker.positions_count(self.instrument)
+
+    def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
+                    magic: int = 0):
+        return self._broker.open_market(is_buy, lots, sl, comment, magic=magic,
+                                        instrument=self.instrument)
+
+    def close_all(self, reason: str) -> None:
+        self._broker.close_all(reason, instrument=self.instrument)
+
+    def trades_opened_since(self, magic: int, since: datetime):
+        """This instrument's openings only — see `MT5Broker` for why the
+        symbol filter matters on a shared account."""
+        return self._broker.trades_opened_since(magic, since,
+                                                instrument=self.instrument)
+
+    # --- contract detail ------------------------------------------------
+    @property
+    def spec(self) -> SymbolSpec:
+        return self._broker.spec_for(self.instrument)
+
+    @property
+    def digits(self) -> int:
+        return self.spec.digits
+
+    @property
+    def point(self) -> float:
+        return self.spec.point
+
+    def normalize_price(self, price: float) -> float:
+        return self._broker.normalize_price(price, self.instrument)
+
+    def normalize_lot(self, lots: float) -> float:
+        return self._broker.normalize_lot(lots, self.instrument)
+
+    def __getattr__(self, name):
+        # everything else — modify, translate_levels, trades_opened_since,
+        # min_stop_distance, the account itself — is shared, so forward it
+        return getattr(self._broker, name)
+
+
+# ==========================================================================
 class SimBroker(Broker):
     """Backtest broker.
 
@@ -207,11 +316,18 @@ class SimBroker(Broker):
         self.log = logger
 
         self._next_ticket = 1
-        self.position: Optional[Position] = None
+        # ONE POSITION PER INSTRUMENT, keyed by instrument name. A
+        # single-instrument run uses the "" key throughout and behaves exactly
+        # as it always did — one slot, one price, one spec. Several
+        # instruments get a slot each, because GC New York and ES New York are
+        # the same hours and refusing the second would make multi-instrument
+        # trading impossible.
+        self.positions: Dict[str, Position] = {}
+        self.specs: Dict[str, SymbolSpec] = {"": spec}
         self.trades: List[ClosedTrade] = []
         self.equity_curve: List[Tuple[datetime, float]] = []
 
-        self._price = 0.0
+        self._prices: Dict[str, float] = {}
         self._now: Optional[datetime] = None
         self.on_exit = None  # callback(ClosedTrade) — used for journal lines
         # the simulated broker executes the very instrument the bars describe,
@@ -222,71 +338,126 @@ class SimBroker(Broker):
         # priced until the next bar exists — see `Broker.prices_from_bars`
         self.prices_from_bars = True
 
+    # -- per-instrument accessors -----------------------------------------
+    def spec_for(self, instrument: str = "") -> SymbolSpec:
+        """This instrument's contract spec, falling back to the run's default."""
+        return self.specs.get(instrument or "", self.spec)
+
+    def add_instrument(self, instrument: str, spec: SymbolSpec,
+                       mt5_symbol: str = "") -> None:
+        """Register an instrument's contract details before trading it.
+
+        `mt5_symbol` is accepted and ignored: a simulated broker has no
+        terminal to route to. The signature matches `MT5Broker` so callers do
+        not have to know which broker they hold.
+        """
+        self.specs[instrument or ""] = spec
+
+    def position_for(self, instrument: str = "") -> Optional[Position]:
+        return self.positions.get(instrument or "")
+
+    @property
+    def position(self) -> Optional[Position]:
+        """The one open position. Kept for single-instrument callers, which is
+        every caller that predates several instruments."""
+        if not self.positions:
+            return None
+        if "" in self.positions:
+            return self.positions[""]
+        return next(iter(self.positions.values()))
+
+    @position.setter
+    def position(self, value: Optional[Position]) -> None:
+        if value is None:
+            self.positions.pop("", None)
+        else:
+            self.positions[getattr(value, "instrument", "") or ""] = value
+
     # -- market context ---------------------------------------------------
-    def set_market(self, price: float, now: datetime) -> None:
-        self._price = float(price)
+    def set_market(self, price: float, now: datetime,
+                   instrument: str = "") -> None:
+        self._prices[instrument or ""] = float(price)
         self._now = now
+
+    def price_of(self, instrument: str = "") -> float:
+        return self._prices.get(instrument or "", 0.0)
 
     # engine hooks
     def sync_market(self, bar: Bar, now: datetime) -> None:
-        self.set_market(bar.open, now)
+        self.set_market(bar.open, now, getattr(bar, "instrument", ""))
 
     def settle_bar(self, bar: Bar) -> None:
         self.process_bar(bar)
 
-    def ask(self) -> float:
-        return self._price + self.spread
+    def ask(self, instrument: str = "") -> float:
+        return self.price_of(instrument) + self.spread
 
-    def bid(self) -> float:
-        return self._price
+    def bid(self, instrument: str = "") -> float:
+        return self.price_of(instrument)
 
     # -- interface --------------------------------------------------------
-    def positions_count(self) -> int:
-        return 1 if self.position else 0
+    def positions_count(self, instrument: Optional[str] = None) -> int:
+        """Open positions. With an instrument, only that one's — which is what
+        the strategy asks, because GC being open must not block ES."""
+        if instrument is None:
+            return len(self.positions)
+        return 1 if self.positions.get(instrument or "") else 0
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
-                    magic: int = 0):
-        if self.position is not None:
+                    magic: int = 0, instrument: str = ""):
+        key = instrument or ""
+        if self.positions.get(key) is not None:
             return False, None, "position already open"
-        price = self.price_for(is_buy)
+        price = self.price_for(is_buy, instrument)
         if price <= 0:
             return False, None, "no price"
         fill = price + (self.slippage if is_buy else -self.slippage)
-        fill = self.normalize_price(fill)
+        fill = self.normalize_price(fill, key)
         pos = Position(
             ticket=self._next_ticket, is_buy=is_buy, lots=lots,
             entry_price=fill, entry_time=self._now, sl=sl, tp=0.0,
             comment=comment, magic=int(magic),
             entry_commission=self.commission * lots,
         )
+        pos.instrument = key
         self._next_ticket += 1
-        self.position = pos
+        self.positions[key] = pos
         return True, pos, ""
 
     def modify(self, position: Position, sl: float, tp: float):
-        if self.position is None or self.position.ticket != position.ticket:
-            return False, "position not found"
-        self.position.sl = sl
-        self.position.tp = tp
-        return True, ""
+        for pos in self.positions.values():
+            if pos.ticket == position.ticket:
+                pos.sl, pos.tp = sl, tp
+                return True, ""
+        return False, "position not found"
 
-    def close_all(self, reason: str) -> None:
-        if self.position is None:
-            return
-        pos = self.position
-        price = self.bid() if pos.is_buy else self.ask()
-        price = price - self.slippage if pos.is_buy else price + self.slippage
-        self._settle(pos, self.normalize_price(price), self._now, reason)
+    def close_all(self, reason: str, instrument: Optional[str] = None) -> None:
+        """Flatten. With an instrument, only that one — a session reaching its
+        stop time must not close another instrument's open trade."""
+        keys = ([instrument or ""] if instrument is not None
+                else list(self.positions))
+        for key in keys:
+            pos = self.positions.get(key)
+            if pos is None:
+                continue
+            price = self.bid(key) if pos.is_buy else self.ask(key)
+            price = price - self.slippage if pos.is_buy else price + self.slippage
+            self._settle(pos, self.normalize_price(price, key), self._now, reason)
 
     # -- bar-by-bar position management ----------------------------------
     def process_bar(self, bar: Bar) -> None:
-        """Walk one base bar and fire SL / TP if touched."""
-        pos = self.position
+        """Walk one base bar and fire SL / TP if touched.
+
+        Only the position on the instrument THIS bar describes — an ES bar
+        must never be walked against a GC position.
+        """
+        key = getattr(bar, "instrument", "") or ""
+        pos = self.positions.get(key)
         if pos is None:
-            self.mark_equity(bar.time, bar.close)
+            self.mark_equity(bar.time, bar.close, key)
             return
         if pos.entry_time is not None and bar.time < pos.entry_time:
-            self.mark_equity(bar.time, bar.close)
+            self.mark_equity(bar.time, bar.close, key)
             return
 
         sl_hit = tp_hit = False
@@ -327,20 +498,22 @@ class SimBroker(Broker):
                 sl_hit = False
 
         if sl_hit:
-            self._settle(pos, self.normalize_price(sl_price),
+            self._settle(pos, self.normalize_price(sl_price, key),
                          bar.time, "STOP LOSS hit")
         elif tp_hit:
-            self._settle(pos, self.normalize_price(tp_price),
+            self._settle(pos, self.normalize_price(tp_price, key),
                          bar.time, "TAKE PROFIT hit")
 
-        self.mark_equity(bar.time, bar.close)
+        self.mark_equity(bar.time, bar.close, key)
 
     # -- P&L --------------------------------------------------------------
     def _settle(self, pos: Position, exit_price: float,
                 exit_time: Optional[datetime], reason: str) -> None:
+        key = getattr(pos, "instrument", "") or ""
+        spec = self.spec_for(key)
         direction = 1.0 if pos.is_buy else -1.0
         gross = (exit_price - pos.entry_price) * direction * pos.lots * \
-            self.spec.value_per_price_unit
+            spec.value_per_price_unit
         commission = pos.entry_commission + self.commission * pos.lots
         net = gross - commission
         self.balance += net
@@ -367,22 +540,36 @@ class SimBroker(Broker):
             range_mid=pos.range_mid,
             trade_no_in_session=pos.trade_no_in_session,
             r_multiple=r_mult,
+            instrument=key,
         )
         self.trades.append(trade)
-        self.position = None
+        self.positions.pop(key, None)
         if self.on_exit:
             self.on_exit(trade)
 
-    def floating_pnl(self, price: float) -> float:
-        if self.position is None or price is None:
-            return 0.0
-        d = 1.0 if self.position.is_buy else -1.0
-        return (price - self.position.entry_price) * d * self.position.lots * \
-            self.spec.value_per_price_unit
+    def floating_pnl(self, price: Optional[float] = None,
+                     instrument: Optional[str] = None) -> float:
+        """Open profit. Across EVERY instrument, each marked at its own last
+        price — a portfolio's equity is not one position's.
 
-    def mark_equity(self, when: datetime, price: Optional[float]) -> None:
-        eq = self.balance + (self.floating_pnl(price) if price is not None else 0.0)
-        self.equity_curve.append((when, eq))
+        `price` overrides the mark for the instrument named, which is how
+        `process_bar` values the bar it is currently walking.
+        """
+        total = 0.0
+        for key, pos in self.positions.items():
+            mark = price if (instrument is not None and key == instrument) \
+                else self.price_of(key)
+            if not mark:
+                continue
+            d = 1.0 if pos.is_buy else -1.0
+            total += (mark - pos.entry_price) * d * pos.lots * \
+                self.spec_for(key).value_per_price_unit
+        return total
+
+    def mark_equity(self, when: datetime, price: Optional[float] = None,
+                    instrument: Optional[str] = None) -> None:
+        self.equity_curve.append(
+            (when, self.balance + self.floating_pnl(price, instrument)))
 
 
 # ==========================================================================
@@ -418,6 +605,14 @@ class MT5Broker(Broker):
         self.magic = min(self.magics)
         self.log = logger
         self.symbol = mt5_cfg.symbol
+        # instrument key -> the symbol in the terminal, and its spec. Empty
+        # means the single-instrument shape: everything answers for
+        # `mt5_cfg.symbol` exactly as it always did.
+        self.symbols: Dict[str, str] = {"": self.symbol}
+        #: last feed price PER INSTRUMENT — a gold bar must not become the
+        #: reference price for an ES order on the same account
+        self._feed_prices: Dict[str, float] = {}
+        self.specs: Dict[str, SymbolSpec] = {"": spec}
         self.translate_levels = bool(getattr(mt5_cfg, "translate_levels", True))
         # last price seen on the DATA FEED (CME), kept apart from the broker's
         # own quote so distances can be measured in the space the signal was
@@ -471,20 +666,24 @@ class MT5Broker(Broker):
         need it to price an order, but it IS how the feed's price reaches the
         broker — which is what lets SL/TP distances be measured in signal space
         rather than against the broker's own quote."""
+        # kept PER INSTRUMENT: a gold bar must not become the reference price
+        # for an ES order sitting on the same account
+        self._feed_prices[getattr(bar, "instrument", "") or ""] = float(bar.close)
         self._feed_price = float(bar.close)
 
-    def reference_price(self, is_buy: bool) -> float:
-        """The feed's price, NOT the broker's. Falls back to the broker quote
-        only if no bar has arrived yet."""
-        if self._feed_price and self._feed_price > 0:
-            return self._feed_price
-        return self.price_for(is_buy)
+    def reference_price(self, is_buy: bool, instrument: str = "") -> float:
+        """The feed's price for THIS instrument, NOT the broker's. Falls back
+        to the broker quote only if no bar has arrived yet."""
+        feed = self._feed_prices.get(instrument or "", 0.0)
+        if feed and feed > 0:
+            return feed
+        return self.price_for(is_buy, instrument)
 
-    def basis(self, is_buy: bool) -> float:
+    def basis(self, is_buy: bool, instrument: str = "") -> float:
         """Execution price minus feed price — how far the two instruments sit
         apart right now. Logged on every fill so a drifting basis is visible."""
-        ref = self.reference_price(is_buy)
-        return self.price_for(is_buy) - ref if ref else 0.0
+        ref = self.reference_price(is_buy, instrument)
+        return self.price_for(is_buy, instrument) - ref if ref else 0.0
 
     def server_time(self) -> datetime:
         """Now, as MT5 sees it. NAIVE and in UTC.
@@ -501,7 +700,38 @@ class MT5Broker(Broker):
                 tzinfo=None)
         return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    def trades_opened_since(self, magic: int, since: datetime):
+    # -- per-instrument -----------------------------------------------
+    def symbol_for(self, instrument: str = "") -> str:
+        """The terminal symbol this instrument trades."""
+        return self.symbols.get(instrument or "", self.symbol)
+
+    def spec_for(self, instrument: str = "") -> SymbolSpec:
+        return self.specs.get(instrument or "", self.spec)
+
+    def add_instrument(self, instrument: str, spec: SymbolSpec,
+                       mt5_symbol: str = "") -> None:
+        """Register an instrument, and read its real contract details from the
+        terminal — digits, tick size and volume steps differ per symbol, and
+        guessing them wrong misprices every order."""
+        key = instrument or ""
+        mt5_symbol = mt5_symbol or spec.name or self.symbol
+        self.symbols[key] = mt5_symbol
+        self.specs[key] = spec
+        prev_symbol, prev_spec = self.symbol, self.spec
+        try:
+            self.symbol, self.spec = mt5_symbol, spec
+            self.mt5.symbol_select(mt5_symbol, True)
+            self._load_symbol_spec()
+        except Exception as exc:                       # pragma: no cover
+            if self.log:
+                self.log.warn(f"Could not read {mt5_symbol} from the terminal "
+                              f"({exc!r}); using the configured contract "
+                              f"details for it.")
+        finally:
+            self.symbol, self.spec = prev_symbol, prev_spec
+
+    def trades_opened_since(self, magic: int, since: datetime,
+                            instrument: str = ""):
         """Count position OPENINGS with this magic since `since`.
 
         Counts entry deals rather than closed positions, so a trade that is
@@ -514,6 +744,7 @@ class MT5Broker(Broker):
             # `server_time` returns, and an `until` safely in the future so a
             # deal recorded a moment ago is not missed.
             until = self.server_time() + timedelta(days=1)
+            want_symbol = self.symbol_for(instrument)
             deals = self.mt5.history_deals_get(since, until)
             if deals is None:
                 return None
@@ -533,7 +764,10 @@ class MT5Broker(Broker):
                     continue
                 if int(d.magic) != int(magic):
                     continue
-                if str(getattr(d, "symbol", "")) != str(self.symbol):
+                # Scoped to the instrument's OWN terminal symbol. Without
+                # this a session on ES would count gold's deals against its
+                # own cap, because every session shares one account.
+                if str(getattr(d, "symbol", "")) != str(want_symbol):
                     continue
                 if int(d.entry) != int(entry_in):
                     continue                      # a close, or a reversal leg
@@ -547,12 +781,12 @@ class MT5Broker(Broker):
             return None
 
     # -- interface --------------------------------------------------------
-    def ask(self) -> float:
-        t = self.mt5.symbol_info_tick(self.symbol)
+    def ask(self, instrument: str = "") -> float:
+        t = self.mt5.symbol_info_tick(self.symbol_for(instrument))
         return t.ask if t else 0.0
 
-    def bid(self) -> float:
-        t = self.mt5.symbol_info_tick(self.symbol)
+    def bid(self, instrument: str = "") -> float:
+        t = self.mt5.symbol_info_tick(self.symbol_for(instrument))
         return t.bid if t else 0.0
 
     def owns(self, magic) -> bool:
@@ -562,16 +796,20 @@ class MT5Broker(Broker):
         except (TypeError, ValueError):
             return False
 
-    def _my_positions(self) -> List:
-        pos = self.mt5.positions_get(symbol=self.symbol) or []
+    def _my_positions(self, instrument: str = "") -> List:
+        pos = self.mt5.positions_get(symbol=self.symbol_for(instrument)) or []
         return [p for p in pos if self.owns(p.magic)]
 
-    def positions_count(self) -> int:
-        return len(self._my_positions())
+    def positions_count(self, instrument: Optional[str] = None) -> int:
+        """Open positions on this instrument. Scoped, because a gold position
+        must not stop an ES session from entering."""
+        if instrument is None:
+            return sum(len(self._my_positions(k)) for k in self.symbols)
+        return len(self._my_positions(instrument))
 
-    def _filling_mode(self):
+    def _filling_mode(self, instrument: str = ""):
         mt5 = self.mt5
-        si = mt5.symbol_info(self.symbol)
+        si = mt5.symbol_info(self.symbol_for(instrument))
         modes = si.filling_mode if si else 0
         if modes & 1:      # SYMBOL_FILLING_FOK
             return mt5.ORDER_FILLING_FOK
@@ -580,13 +818,13 @@ class MT5Broker(Broker):
         return mt5.ORDER_FILLING_RETURN
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
-                    magic: int = 0):
+                    magic: int = 0, instrument: str = ""):
         mt5 = self.mt5
         magic = int(magic) if magic else self.magic
-        price = self.ask() if is_buy else self.bid()
+        price = self.ask(instrument) if is_buy else self.bid(instrument)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
+            "symbol": self.symbol_for(instrument),
             "volume": float(lots),
             "type": mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
             "price": price,
@@ -599,7 +837,7 @@ class MT5Broker(Broker):
             # not be able to get an order rejected for length
             "comment": str(comment)[:31],
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": self._filling_mode(),
+            "type_filling": self._filling_mode(instrument),
         }
         if self.cfg.dry_run:
             if self.log:

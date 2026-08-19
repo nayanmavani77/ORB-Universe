@@ -44,6 +44,9 @@ def trades_dataframe(trades: Sequence[ClosedTrade]) -> pd.DataFrame:
         rows.append({
             "#": i,
             "ticket": t.ticket,
+            # which instrument the trade was on. Blank for a single-instrument
+            # run, so every existing CSV keeps its shape.
+            "instrument": getattr(t, "instrument", "") or "",
             "direction": t.direction,
             "lots": t.lots,
             "session_name": t.session_name,
@@ -442,6 +445,34 @@ def session_names(result, df) -> List[str]:
     traded = set(df["session_name"]) if "session_name" in df.columns else set()
     named = [n for n in order if n in traded]
     return named + [n for n in sorted(traded) if n not in order]
+
+
+def instrument_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Net, trades and win rate per instrument.
+
+    A portfolio run blends several instruments into one balance, so the
+    headline says nothing about which of them earned it. This is the split.
+    Empty for a single-instrument run, which has nothing to split.
+    """
+    if df.empty or "instrument" not in df.columns:
+        return pd.DataFrame()
+    names = [n for n in df["instrument"].dropna().unique() if str(n)]
+    if len(names) < 2:
+        return pd.DataFrame()
+    rows = []
+    for name in sorted(names):
+        d = df[df["instrument"] == name]
+        wins = int((d["net_profit"] > 0).sum())
+        rows.append({
+            "instrument": name,
+            "trades": len(d),
+            "wins": wins,
+            "losses": int((d["net_profit"] < 0).sum()),
+            "win_rate": (wins / len(d) * 100.0) if len(d) else 0.0,
+            "net_profit": float(d["net_profit"].sum()),
+            "avg_r": float(d["r_multiple"].mean()) if len(d) else 0.0,
+        })
+    return pd.DataFrame(rows).set_index("instrument")
 
 
 def session_summary(result, df) -> pd.DataFrame:
@@ -953,7 +984,7 @@ def _kv(rows) -> str:
 def _setup_rows(cfg, stats, cur):
     b = cfg.backtest
     return [
-        ("Symbol", html.escape(str(cfg.symbol.name)), ""),
+        ("Symbol", html.escape(_instruments_line(cfg)), ""),
         ("Data", html.escape(f"{cfg.databento.dataset} / {cfg.databento.symbols} "
                              f"/ {cfg.databento.schema}"), ""),
         ("Contract selection",
@@ -1044,6 +1075,38 @@ def _engine_options_cell(s) -> str:
         return '<span class="muted">—</span>'
     return ", ".join(f"{html.escape(str(k))}={html.escape(str(v))}"
                      for k, v in sorted(options.items()))
+
+
+def _instruments_table(df) -> str:
+    """Per-instrument split. Renders nothing unless the run had more than one."""
+    summary = instrument_summary(df)
+    if summary.empty:
+        return ""
+    rows = "".join(
+        "<tr><td>{n}</td><td class='num'>{t}</td><td class='num'>{w:.1f}%</td>"
+        "<td class='num {cls}'>{net:,.2f}</td><td class='num'>{r:+.2f}R</td></tr>".format(
+            n=html.escape(str(name)), t=int(r["trades"]), w=r["win_rate"],
+            net=r["net_profit"], r=r["avg_r"],
+            cls=("pos" if r["net_profit"] > 0 else "neg"))
+        for name, r in summary.iterrows())
+    return (
+        "<h2>By instrument</h2>"
+        "<p class='sub'>This run traded more than one instrument on one "
+        "account. The headline blends them; this is who earned it.</p>"
+        "<div class='scroll'><table><thead><tr><th>Instrument</th>"
+        "<th class='num'>Trades</th><th class='num'>Win rate</th>"
+        "<th class='num'>Net</th><th class='num'>Avg R</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>")
+
+
+def _instruments_line(cfg) -> str:
+    """What this run traded. One name, or every mapping in a portfolio run."""
+    insts = getattr(cfg, "instruments", None) or {}
+    if not insts:
+        return str(cfg.symbol.name)
+    return " · ".join(
+        f"{key}: {(i.signal or key)} -> {(i.mt5 or '?')}"
+        for key, i in sorted(insts.items()))
 
 
 def _sessions_table(cfg, result, df) -> str:
@@ -1275,7 +1338,7 @@ def build_html(result, stats: Dict, df: pd.DataFrame,
 </section>
 
 <h2>Sessions actually run</h2>
-<div class="card">{_sessions_table(cfg, result, df)}
+<div class="card">{_instruments_table(df)}{_sessions_table(cfg, result, df)}
 <p class="note" style="margin:12px 0 0">The settings each session ran with,
 including any per-session override. All times are server time.</p></div>
 

@@ -57,7 +57,8 @@ SANITY_BAND = 0.25          # +/- 25%
 
 
 class DatabentoLiveFeed:
-    def __init__(self, cfg, clock: ServerClock, logger=None):
+    def __init__(self, cfg, clock: ServerClock, logger=None,
+                 instrument: str = ""):
         try:
             import databento as db
         except ImportError as exc:  # pragma: no cover
@@ -70,6 +71,11 @@ class DatabentoLiveFeed:
                 "wins over the file. The key is deliberately NOT in the engine "
                 "config, which is tracked in git.")
         self._db = db
+        #: which instrument every bar from this feed belongs to. One feed per
+        #: instrument — GC and ES are different subscriptions, different front
+        #: months and different price scales, and merging them into one stream
+        #: would be exactly the calendar-spread bug all over again.
+        self.instrument = instrument
         self.cfg = cfg
         self.clock = clock
         self.log = logger
@@ -114,17 +120,21 @@ class DatabentoLiveFeed:
             # before it is a repeat of history, not new information
             self._last_ts = last_time
         if self.log and self._contract:
-            self.log.info(f"Live feed locked to contract {self._contract} — "
-                          f"bars from any other instrument under "
-                          f"{self.cfg.symbols} are ignored.")
+            who = f"[{self.instrument}] " if self.instrument else ""
+            self.log.info(f"{who}Live feed locked to contract "
+                          f"{self._contract} — bars from any other instrument "
+                          f"under {self.cfg.symbols} are ignored.")
 
     def filter_report(self) -> str:
         """One line describing what the feed rejected. For the shutdown log."""
         dropped = {k: v for k, v in self._dropped.items() if v}
+        who = f"[{self.instrument}] " if self.instrument else ""
         if not dropped:
-            return f"Live feed: {self._accepted:,} bars accepted, none filtered."
+            return (f"{who}Live feed: {self._accepted:,} bars accepted, "
+                    f"none filtered.")
         detail = ", ".join(f"{v:,} {k.replace('_', ' ')}" for k, v in dropped.items())
-        return f"Live feed: {self._accepted:,} bars accepted | filtered {detail}"
+        return (f"{who}Live feed: {self._accepted:,} bars accepted "
+                f"| filtered {detail}")
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -271,7 +281,8 @@ class DatabentoLiveFeed:
         self._last_ts = server_time
         self.last_price = c
         return Bar(server_time, o, h, l, c,
-                   float(getattr(record, "volume", 0) or 0))
+                   float(getattr(record, "volume", 0) or 0),
+                   self.instrument)
 
     # ------------------------------------------------------------------
     def poll(self, timeout: float = 1.0) -> Optional[Bar]:

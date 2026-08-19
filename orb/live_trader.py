@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import signal
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from .broker import MT5Broker
 from .config import AppConfig, journal_settings
@@ -56,10 +56,38 @@ class LiveTrader:
         self.broker = broker or MT5Broker(cfg.mt5, cfg.symbol, magics, self.log)
         # one strategy per enabled session, exactly as in the backtest — the
         # single-session case yields one engine and behaves as it always did
+        # Tell the broker about every instrument BEFORE any session opens:
+        # which terminal symbol each trades, and its contract details read
+        # from MT5 itself. Without this an ES order would be sent to gold's
+        # symbol and priced with gold's contract size.
+        register = getattr(self.broker, "add_instrument", None)
+        if callable(register) and cfg.instruments:
+            for name, inst in cfg.instruments.items():
+                register(name, inst.spec(cfg.symbol),
+                         inst.mt5 or cfg.mt5.symbol)
+
         self.engine = MultiEngine(cfg.enabled_sessions(), self.broker,
                                   logger=self.log)
         self.engine.after_tick = self._after_tick
-        self.feed = feed or DatabentoLiveFeed(cfg.databento, self.clock, self.log)
+        # ONE FEED PER INSTRUMENT. Two instruments are two Databento
+        # subscriptions with two front months and two price scales; a single
+        # stream would merge them exactly as the calendar-spread bug did.
+        # A single-instrument run keeps one feed under the "" key, so nothing
+        # about it changes.
+        self.feeds: Dict[str, object] = {}
+        if feed is not None:
+            self.feeds[""] = feed
+        elif cfg.instruments:
+            for name in cfg.instruments:
+                self.feeds[name] = DatabentoLiveFeed(
+                    self.databento_for(name), self.clock, self.log,
+                    instrument=name)
+        else:
+            self.feeds[""] = DatabentoLiveFeed(cfg.databento, self.clock,
+                                               self.log)
+        self.feed = next(iter(self.feeds.values()))
+        #: which feed gets polled first next time — see `_next_bar`
+        self._feed_turn = 0
         self._running = False
         #: throttle for the closed-deal poll; None means "poll now"
         self._last_deal_check = None
@@ -182,6 +210,22 @@ class LiveTrader:
                           f"is resolved.")
             return None
 
+    def databento_for(self, instrument: str):
+        """This instrument's Databento settings: the shared block, with the
+        instrument's own symbol and any per-instrument overrides applied."""
+        import copy
+        cfg = copy.deepcopy(self.cfg.databento)
+        inst = (self.cfg.instruments or {}).get(instrument)
+        if inst is None:
+            return cfg
+        if inst.signal:
+            cfg.symbols = inst.signal
+        for attr in ("dataset", "stype_in", "contract_mode", "contract_symbol"):
+            value = getattr(inst, attr, "")
+            if value:
+                setattr(cfg, attr, value)
+        return cfg
+
     def _replay_session(self, session_start, session_end, session_cfg):
         """How many trades this session ALREADY signalled, before the EA ran.
 
@@ -202,10 +246,14 @@ class LiveTrader:
         falls back to the conservative path.
         """
         import copy
-        window = [b for b in self._warmup_bars
-                  if session_start <= b.time < session_end] if self._warmup_bars else []
-        traded = [b for b in self._warmup_bars
-                  if b.time >= session_end] if self._warmup_bars else []
+        # Only THIS session's instrument. The warm-up holds every instrument's
+        # history merged into one list, so replaying it whole would price a
+        # gold session on ES bars and count trades that were never its own.
+        want = (getattr(session_cfg, "instrument", "") or "")
+        history = [b for b in (self._warmup_bars or [])
+                   if (getattr(b, "instrument", "") or "") == want]
+        window = [b for b in history if session_start <= b.time < session_end]
+        traded = [b for b in history if b.time >= session_end]
         # ONE bar is a perfectly valid range window and must not be rejected:
         # London's 03:00-03:15 on M15 is exactly one bar, as is any 1-minute
         # window on M1. Requiring two silently returned None for precisely
@@ -229,13 +277,15 @@ class LiveTrader:
             self.log.warn(f"Could not replay this session's history ({exc!r}).")
             return None
 
-    def _lock_feed(self, contract, bars) -> None:
-        """Point the live feed at one contract, with a price to sanity-check.
+    def _lock_feed(self, contract, bars, instrument: str = "") -> None:
+        """Point ONE instrument's live feed at one contract, with a price to
+        sanity-check.
 
         Guarded with `getattr` because tests inject simple fake feeds that have
         no such method, and a missing filter must not break the loop.
         """
-        lock = getattr(self.feed, "lock_contract", None)
+        feed = self.feeds.get(instrument, self.feed)
+        lock = getattr(feed, "lock_contract", None)
         if not callable(lock):
             return
         last = bars[-1] if bars else None
@@ -256,50 +306,54 @@ class LiveTrader:
                    - last.time).total_seconds() / 60.0
             if gap > 1.5:
                 self.log.warn(
-                    f"Coverage gap: history ends {last.time:%H:%M} server "
+                    f"Coverage gap{f' [{instrument}]' if instrument else ''}: "
+                    f"history ends {last.time:%H:%M} server "
                     f"time, the live feed starts now — about {gap:,.0f} minute"
                     f"{'s' if gap >= 2 else ''} of bars belong to neither and "
                     f"are lost. Harmless once a range is already built; if a "
                     f"range window falls inside the gap it will be built from "
                     f"fewer bars than usual.")
 
-    def warmup(self, days: int = 3) -> None:
-        """Seed the bar history from Databento so the range for the current
-        session can be rebuilt immediately after a restart."""
-        try:
-            import databento as db
-        except ImportError:
-            self.log.warn("databento not installed - skipping history warm-up.")
-            return
+    def _download_history(self, client, dbn, start, end):
+        """One Databento pull, written to a temp file and read back as bars.
+
+        Returns `(contract, bars)`. Kept separate because the warm-up does this
+        twice — once normally, once after a 422 tells us where the data really
+        ends — and the two copies had already drifted apart once.
+        """
         import os
         import tempfile
-        cfg = self.cfg.databento
+        data = client.timeseries.get_range(
+            dataset=dbn.dataset, symbols=dbn.symbols, schema=dbn.schema,
+            stype_in=dbn.stype_in, start=start, end=end)
+        fd, tmp = tempfile.mkstemp(suffix=".dbn.zst")
+        os.close(fd)
+        data.to_file(tmp)
         try:
-            client = db.Historical(cfg.api_key)
-            end = self._history_end(client, cfg)
-            start = datetime.fromtimestamp(end.timestamp() - days * 86400,
-                                           tz=timezone.utc)
-            data = client.timeseries.get_range(
-                dataset=cfg.dataset, symbols=cfg.symbols, schema=cfg.schema,
-                stype_in=cfg.stype_in, start=start, end=end)
-            fd, tmp = tempfile.mkstemp(suffix=".dbn.zst")
-            os.close(fd)
-            data.to_file(tmp)
             from .data.dbn import load_dbn_bars
             contract = self._front_month(tmp)
             bars = load_dbn_bars(tmp, self.clock)
+        finally:
             os.unlink(tmp)
-            # replay warm-up bars into history only — no trading decisions
-            # are taken on past bars (see Engine.warmup_bar)
-            for b in bars:
-                self.engine.warmup_bar(b)
-            self._warmup_bars = list(bars)
-            if bars:
-                self.log.info(f"Warm-up: loaded {len(bars)} historical bars up to "
-                              f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
-            self._lock_feed(contract, bars)
+        return contract, bars
+
+    def _warmup_one(self, client, instrument: str, days: int) -> list:
+        """Warm ONE instrument: download its own history, tag it, feed it to
+        the engine, and point that instrument's feed at the same contract.
+
+        Every instrument is a different Databento symbol with its own front
+        month and its own price scale, so this cannot be shared. The bars are
+        tagged before they reach the engine, which is what stops a gold bar
+        from moving an ES range.
+        """
+        dbn = self.databento_for(instrument)
+        end = self._history_end(client, dbn)
+        start = datetime.fromtimestamp(end.timestamp() - days * 86400,
+                                       tz=timezone.utc)
+        try:
+            contract, bars = self._download_history(client, dbn, start, end)
         except (AttributeError, TypeError, NameError):
-            # a wiring mistake in this module, not a bad network day - never
+            # a wiring mistake in this module, not a bad network day — never
             # let it hide behind a warning that reads like a Databento outage
             raise
         except Exception as exc:
@@ -307,38 +361,135 @@ class LiveTrader:
             # catches the case where the metadata endpoint disagreed with the
             # timeseries endpoint, or was unreachable above.
             capped = self._parse_available_end(exc)
-            if capped is not None:
-                self.log.warn(f"History warm-up rejected: data ends "
-                              f"{capped:%Y-%m-%d %H:%M} UTC. Retrying up to "
-                              f"there.")
-                try:
-                    start = datetime.fromtimestamp(
-                        capped.timestamp() - days * 86400, tz=timezone.utc)
-                    data = client.timeseries.get_range(
-                        dataset=cfg.dataset, symbols=cfg.symbols,
-                        schema=cfg.schema, stype_in=cfg.stype_in,
-                        start=start, end=capped)
-                    fd, tmp = tempfile.mkstemp(suffix=".dbn.zst")
-                    os.close(fd)
-                    data.to_file(tmp)
-                    from .data.dbn import load_dbn_bars
-                    contract = self._front_month(tmp)
-                    bars = load_dbn_bars(tmp, self.clock)
-                    os.unlink(tmp)
-                    for b in bars:
-                        self.engine.warmup_bar(b)
-                    self._warmup_bars = list(bars)
-                    if bars:
-                        self.log.info(
-                            f"Warm-up: loaded {len(bars)} historical bars up to "
-                            f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
-                    self._lock_feed(contract, bars)
-                    return
-                except Exception as retry_exc:
-                    exc = retry_exc
-            self.log.warn(f"History warm-up failed ({exc!r}) - the EA will build "
-                          f"the range from live bars only. A session whose range "
-                          f"window has already closed will be SKIPPED for today.")
+            if capped is None:
+                raise
+            self.log.warn(f"History warm-up rejected for "
+                          f"{instrument or dbn.symbols}: data ends "
+                          f"{capped:%Y-%m-%d %H:%M} UTC. Retrying up to there.")
+            start = datetime.fromtimestamp(capped.timestamp() - days * 86400,
+                                           tz=timezone.utc)
+            contract, bars = self._download_history(client, dbn, start, capped)
+
+        for b in bars:
+            b.instrument = instrument
+        # history only — no trading decisions are taken on past bars
+        # (see Engine.warmup_bar)
+        for b in bars:
+            self.engine.warmup_bar(b)
+        if bars:
+            self.log.info(f"Warm-up{f' [{instrument}]' if instrument else ''}: "
+                          f"loaded {len(bars)} historical bars up to "
+                          f"{bars[-1].time:%Y.%m.%d %H:%M} server time.")
+        self._lock_feed(contract, bars, instrument)
+        return bars
+
+    def warmup(self, days: int = 3) -> None:
+        """Seed the bar history from Databento so the range for the current
+        session can be rebuilt immediately after a restart.
+
+        With several instruments this runs once per instrument. One failing
+        does not stop the others: a warning is logged and that instrument
+        starts from live bars only, exactly as a single-instrument run does
+        when its download fails.
+        """
+        try:
+            import databento as db
+        except ImportError:
+            self.log.warn("databento not installed - skipping history warm-up.")
+            return
+        client = db.Historical(self.cfg.databento.api_key)
+        names = list(self.cfg.instruments or {}) or [""]
+        collected = []
+        for name in names:
+            try:
+                collected.extend(self._warmup_one(client, name, days))
+            except (AttributeError, TypeError, NameError):
+                raise
+            except Exception as exc:
+                self.log.warn(
+                    f"History warm-up failed"
+                    f"{f' for {name}' if name else ''} ({exc!r}) - the EA will "
+                    f"build the range from live bars only. A session whose "
+                    f"range window has already closed will be SKIPPED for "
+                    f"today.")
+        # merged the same way the backtest merges them, so a replay sees the
+        # instruments interleaved exactly as `load_instrument_bars` would
+        collected.sort(key=lambda b: (b.time, getattr(b, "instrument", "") or ""))
+        self._warmup_bars = collected
+        self.check_price_scale()
+
+    # ------------------------------------------------------------------
+    #: How far the signal price and the execution price may sit apart before
+    #: it stops looking like basis and starts looking like a mistake.
+    #:
+    #: Real basis is small: GC futures and XAUUSD spot sit about $56 apart on
+    #: ~2400, which is 2.3%. Index CFDs track their futures within a fraction
+    #: of a percent. So 10% is comfortably above any honest basis...
+    SCALE_WARN = 0.10
+    #: ...and beyond this the two are not the same market on the same scale.
+    #: A CFD quoted in a different unit — 608.0 where the future says 6080 —
+    #: lands here, and so does a symbol mapped to the wrong market entirely.
+    SCALE_ALARM = 0.50
+
+    def check_price_scale(self) -> None:
+        """Prove the signal and the execution venue are quoted on ONE scale.
+
+        This is the assumption the whole cross-instrument design rests on and
+        the only one nothing else checks. The strategy computes its range, stop
+        and target from Databento FUTURES prices, then sends the stop and
+        target to MT5 as DISTANCES IN POINTS (see `translate_levels`). That is
+        only valid if one point means the same size of move on both sides.
+
+        It usually does — ES and a US500 CFD are both quoted in index points,
+        GC and XAUUSD both in dollars per ounce — but "usually" is not a thing
+        to trade on. If a broker quotes its CFD on a different scale, every
+        stop and target is wrong by that factor, silently: the orders are
+        accepted, the journal looks ordinary, and only the money is wrong.
+
+        So compare the two prices directly, once, at start-up. Nothing is
+        blocked — a stale weekend quote should not stop a session — but the
+        operator gets a loud, specific warning before the first order.
+        """
+        last = {}
+        for b in self._warmup_bars or []:
+            last[getattr(b, "instrument", "") or ""] = b
+        if not last:
+            return
+
+        for name, bar in sorted(last.items()):
+            try:
+                quote = self.broker.ask(name) if name else self.broker.ask()
+            except Exception:
+                continue
+            signal = float(bar.close)
+            if not quote or not signal:
+                continue                     # market closed, or a sim broker
+
+            gap = abs(quote - signal) / signal
+            who = f"[{name}] " if name else ""
+            symbol = getattr(self.broker, "symbol_for", lambda _n: "")(name) \
+                or getattr(self.broker, "symbol", "")
+            detail = (f"signal {signal:,.2f} vs {symbol or 'broker'} "
+                      f"{quote:,.2f} ({gap * 100:,.1f}% apart)")
+
+            if gap >= self.SCALE_ALARM:
+                ratio = quote / signal
+                self.log.warn(
+                    f"{who}PRICE SCALE MISMATCH — {detail}. These do not look "
+                    f"like the same market on the same scale"
+                    + (f" (roughly {ratio:.3g}x)" if ratio else "") + ". Stops "
+                    f"and targets cross as DISTANCES IN POINTS, so if one "
+                    f"point means a different size of move on each side, every "
+                    f"stop and target is wrong by that factor and nothing else "
+                    f"will tell you. CHECK the `mt5:` symbol for this "
+                    f"instrument before letting it trade.")
+            elif gap >= self.SCALE_WARN:
+                self.log.warn(
+                    f"{who}Wide basis — {detail}. Larger than the usual gap "
+                    f"between a future and its cash/CFD equivalent. Worth "
+                    f"confirming the mapping is the market you meant.")
+            else:
+                self.log.info(f"{who}Scale check OK — {detail}.")
 
     # ------------------------------------------------------------------
     #: how often the closed-deal poll actually queries MT5
@@ -407,7 +558,7 @@ class LiveTrader:
                 continue                       # priming only: already history
             if owns is not None and not owns(d.magic):
                 continue
-            if d.symbol != self.cfg.mt5.symbol:
+            if d.symbol not in self._our_symbols():
                 continue
             if d.entry != mt5.DEAL_ENTRY_OUT:
                 continue                       # opens are journaled on placement
@@ -421,6 +572,15 @@ class LiveTrader:
                 d.price, d.profit + d.swap + d.commission,
                 self.cfg.symbol.currency)
 
+    def _our_symbols(self) -> set:
+        """Every terminal symbol this run trades. A portfolio account may hold
+        several, and filtering on one would drop the others' exits."""
+        symbols = {self.cfg.mt5.symbol}
+        for inst in (self.cfg.instruments or {}).values():
+            if inst.mt5:
+                symbols.add(inst.mt5)
+        return symbols
+
     def _strategy_for_magic(self, magic: int):
         """The strategy of the session that uses this magic number.
 
@@ -433,6 +593,40 @@ class LiveTrader:
         return self.strategy
 
     # ------------------------------------------------------------------
+    def _next_bar(self, poll_seconds: float):
+        """The next bar from any feed, fairly.
+
+        ONE feed — every single-instrument run — is polled exactly as it always
+        was: one blocking poll, nothing else changed.
+
+        With several, a naive `for f in feeds: poll(blocking)` is wrong twice
+        over. It always starts at the same feed, so a busy first instrument can
+        starve a quiet second one; and each blocking poll costs its full
+        timeout, so N feeds make one loop pass take N x poll_seconds and the
+        idle tick — which drives stop times and range building — runs N times
+        slower.
+
+        So: sweep every feed without blocking first, starting one further along
+        each time, and only block when they are all empty. Whichever feed
+        answers, the bar arrives tagged and `MultiEngine` routes it.
+        """
+        feeds = list(self.feeds.values())
+        if len(feeds) == 1:
+            return feeds[0].poll(timeout=poll_seconds)
+
+        n = len(feeds)
+        for i in range(n):
+            f = feeds[(self._feed_turn + i) % n]
+            bar = f.poll(timeout=0)
+            if bar is not None:
+                self._feed_turn = (self._feed_turn + i + 1) % n
+                return bar
+        # nothing waiting anywhere: block once, on the feed whose turn it is,
+        # so the loop sleeps rather than spinning the CPU
+        f = feeds[self._feed_turn]
+        self._feed_turn = (self._feed_turn + 1) % n
+        return f.poll(timeout=poll_seconds)
+
     def run(self, poll_seconds: float = 1.0, max_polls: Optional[int] = None,
             now_fn=None) -> None:
         """Main loop.
@@ -483,7 +677,8 @@ class LiveTrader:
 
         self.log.info("Times are broker server time. Current server time: "
                       f"{now_fn():%Y.%m.%d %H:%M}")
-        self.feed.start()
+        for f in self.feeds.values():
+            f.start()
 
         polls = 0
         try:
@@ -491,19 +686,21 @@ class LiveTrader:
                 if max_polls is not None and polls >= max_polls:
                     break
                 polls += 1
-                bar = self.feed.poll(timeout=poll_seconds)
+                bar = self._next_bar(poll_seconds)
                 if bar is None:
                     self.engine.on_idle(now_fn())
                 else:
                     self.engine.on_bar(bar, now=now_fn(bar))
         finally:
-            self.feed.stop()
+            for f in self.feeds.values():
+                f.stop()
             # what the feed filtered out — worth seeing, because a large
             # "other contract" count next to zero accepted means the lock is
             # on the wrong symbol and the EA has been sitting blind
-            report = getattr(self.feed, "filter_report", None)
-            if callable(report):
-                self.log.info(report())
+            for f in self.feeds.values():
+                report = getattr(f, "filter_report", None)
+                if callable(report):
+                    self.log.info(report())
             if hasattr(self.broker, "shutdown"):
                 self.broker.shutdown()
             self.log.info("Stopped: EA removed. Open positions are left untouched.")

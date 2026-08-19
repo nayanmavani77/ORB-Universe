@@ -86,9 +86,11 @@ session.
 
 ### The shared blocks must agree
 
-A merged run has one account, one instrument and one data feed — physically
-there is only one. So `symbol`, `databento`, `mt5`, the clock and the account
-half of `backtest` must **match** across the files taking part. They are not
+A merged run has one account and one clock — physically there is only one. So
+`symbol`, `databento`, `mt5`, the clock and the account half of `backtest` must
+**match** across the files taking part. (Those are the *defaults*; an
+`instruments:` entry overrides the symbol and feed per market — see
+[Instruments](#instruments) below.) They are not
 silently taken from the first file:
 
 ```
@@ -462,6 +464,145 @@ happened to be open and report a pass the EA could never reproduce.
 
 ---
 
+## Instruments
+
+One system, several markets. An instrument is four facts:
+
+```yaml
+instruments:
+  es:
+    signal: "ES.FUT"              # Databento parent symbol — where the signal is
+    mt5:    "US500"               # terminal symbol — where the order goes
+    value_per_point: 50.0         # money per 1.0 of price per lot
+    data:   ["data/es_1m.parquet"]
+```
+
+and a session says which one it trades:
+
+```yaml
+sessions:
+  es_new_york:
+    instrument: es
+```
+
+Everything else follows from those five lines. The mechanism, layer by layer:
+
+**Bars carry a tag.** `Bar.instrument` names the market a bar describes.
+`load_instrument_bars` loads each instrument through the *same* single-contract,
+spread-free path a single-instrument run uses — its own files, its own contract
+mode — then tags and merges them in time order. Live, there is one Databento
+feed *per instrument*, each locked to its own front month, each tagging what it
+emits. Two markets are two subscriptions with two price scales; merging them into
+one stream is exactly the mistake the calendar-spread bug was.
+
+**`MultiEngine` routes on the tag.** `engines_for(bar)` hands a bar only to the
+sessions whose `instrument` matches. A gold bar cannot move an ES range. An
+*untagged* bar in a run with exactly one declared instrument is adopted by it,
+so every bar file written before this feature still runs unchanged.
+
+**`InstrumentView` scopes the broker.** Each session gets a per-instrument face
+of the shared account: `ask()`, `positions_count()`, `open_market(...)`, `digits`
+and `trades_opened_since(...)` all arrive at the broker with the instrument
+attached, while balance, trade list and equity curve fall through to the one
+shared account. That is what lets a portfolio work without a single line of
+strategy code learning that instruments exist.
+
+**Positions are per instrument; money is shared.** `SimBroker` and `MT5Broker`
+both keep `positions[instrument]`, and floating P&L sums across them. Gold being
+long does not block an ES entry; both draw on one balance and one drawdown
+curve. Two sessions on the *same* instrument still may not overlap — they would
+fight over its one position slot — while two on *different* instruments may
+share a window, because New York is New York for both.
+
+**Each instrument is valued with its own spec.** `InstrumentConfig.spec()`
+overlays the instrument's `value_per_point` (and any contract details it states)
+onto the shared `symbol:` defaults. Live, `add_instrument` then reads the real
+digits, tick size and volume steps from the terminal, which override both. An
+identical 22-point move is $2,200 on gold and $1,100 on ES — and getting this
+wrong is silent, because the trades all look right and only the money is
+fiction. `tests/test_instruments.py` pins it.
+
+**Selection.** `--instruments gc,es` narrows a run in backtest, sweep and live;
+`AppConfig.select_instruments` disables the sessions that trade anything else
+and refuses a name that is not declared, because the symptom of a typo would
+otherwise be a run that quietly does nothing. A sweep runs the whole parameter
+grid once per instrument, tagging each result row.
+
+**The signal and the venue are different instruments.** The backtest prices a
+trade from Databento CME FUTURES; live, the order fills on the broker's CFD.
+Three things follow, and only the first two were already handled:
+
+* *Price level* differs — GC and XAUUSD sit ~$56 apart. Handled: SL and TP
+  cross as DISTANCES from the real fill, not as absolute levels
+  (`translate_levels`), and the gap is journalled as `basis` on every entry.
+* *Money per point* differs — the CME contract is not the broker's contract.
+  Handled: `value_per_point` is the BROKER's figure, because the broker is who
+  pays. Points come from the futures, money comes from the CFD, and that is
+  deliberate — it makes the backtest predict the account, not the exchange.
+  `tools/mt5_check.py --suggest US500,USTEC` reads it off the terminal.
+* *Points per unit of move* must be the SAME on both sides, and nothing checked
+  it. If a broker quoted its CFD at 608.0 where the future says 6080, every
+  stop and target would be wrong by 10x — orders accepted, journal ordinary,
+  only the money wrong. `LiveTrader.check_price_scale` now compares the last
+  warm-up bar against the broker's quote per instrument at start-up: under 10%
+  passes (real basis lives here), 10-50% warns, beyond 50% says the mapping is
+  probably not the market you meant. It warns rather than blocks — a stale
+  weekend quote must not stop a session.
+
+**Lot rules are the broker's; price rounding is the signal's.** An instrument
+may override `volume_min/step/max` — those govern the ORDER, so the terminal's
+rules must reach the backtest or it sizes trades MT5 would round or reject. It
+must NOT override `digits/point/tick_size` — those round PRICES, and the
+backtest prices CME futures, not the CFD. Copying XAUUSDm's 3 decimals onto a
+`gc` that is really priced from GC futures (2 decimals) shifted every stop by a
+tenth of a cent and changed 3 of the 24 golden-master cases. Live reads all
+three from MT5 at start-up regardless, so pinning them buys nothing and costs
+reproducibility. `tools/mt5_check.py --suggest` emits the first group and
+deliberately omits the second; `test_instruments.py` asserts the shipped
+configs keep it that way.
+
+**One name, one instrument.** Engine configs that may run merged must define a
+shared instrument identically — the loader compares them and refuses a run where
+`gc` means two different things, the same way it already guards `symbol` and
+`mt5`.
+
+**The (session x instrument) matrix.** A session is a WINDOW; an
+`instruments:` block under it lists which symbols trade that window. The row
+holds what they share, each cell what one symbol does differently, and each
+cell switches on and off alone. `AppConfig.from_dict` expands every cell into
+one ordinary session named `<session>_<instrument>`, so nothing downstream —
+the engine, the broker, the report — learns a new concept.
+
+Inheritance is three levels: defaults -> row -> cell. `_merge_session` performs
+ONE level and is called twice, so three-level inheritance cannot drift from the
+two-level behaviour every existing config relies on; `news` and `engine_options`
+merge member by member at each level. `test_instruments.py` asserts a cell and
+the flat session it stands for are identical field for field.
+
+A cell's `enabled` is ANDed with the row's, so switching the row off silences
+every symbol under it. Magic numbers are auto-assigned in declaration order and
+validated for uniqueness; anything already trading live should pin its own,
+because inserting a cell above it would shift the numbers after it.
+
+**Untagged bars are an error when the run spans several instruments.** Before,
+`engines_for` returned every engine — which handed gold bars to an ES session
+whose broker then had no price under `es`, so the run quietly took ZERO trades.
+Silence is the worst outcome, so it now raises and names the fix. A run with
+exactly ONE instrument still adopts whatever it is given, and now RE-tags it:
+bar lists are expensive, callers reuse them across runs, and a stale tag from a
+previous run would otherwise match no engine and silence this one.
+
+**Only what an enabled session trades is loaded.** `load_instrument_bars`
+skips declared instruments no enabled session names, so a 3x3 matrix with most
+cells off does not demand data files that were never downloaded. `sweep`
+defaults the same way.
+
+**Reporting.** The trades CSV gains an `instrument` column, the report gains a
+per-instrument breakdown, and the output folder is named after what the run
+traded so two markets on identical settings cannot overwrite each other.
+
+---
+
 ## Outputs
 
 ```
@@ -501,14 +642,17 @@ the cent. All 24 identical across the whole restructure.
 | `python tests/test_data_layer.py` | 22 |
 | `python tests/test_single_source.py` | 20 |
 | `python -m pytest tests/test_orb_reverse.py` | 28 |
-| `python -m pytest tests/test_multi_engine.py` | 45 |
+| `python -m pytest tests/test_multi_engine.py` | 46 |
 | `python -m pytest tests/test_live_feed.py` | 18 |
-| `python -m pytest tests/test_late_start.py` | 15 |
+| `python -m pytest tests/test_late_start.py` | 16 |
 | `python -m pytest tests/test_range_window.py` | 9 |
 | `python -m pytest tests/test_exit_journal.py` | 10 |
 | `python -m pytest tests/test_bar_timing.py` | 10 |
 | `python -m pytest tests/test_journal.py` | 12 |
+| `python -m pytest tests/test_instruments.py` | 58 |
 
-The load-bearing test is `test_mixed_engines_equal_separate_runs`: Asia on `orb`
-plus London on `orb_reverse`, in one backtest, produces exactly the trades each
-produces alone.
+The load-bearing tests are two. `test_mixed_engines_equal_separate_runs`: Asia on
+`orb` plus London on `orb_reverse`, in one backtest, produces exactly the trades
+each produces alone. And `test_each_instrument_is_valued_with_its_own_contract
+_spec`: the identical move on two instruments must earn different money, in the
+exact ratio of their `value_per_point`.

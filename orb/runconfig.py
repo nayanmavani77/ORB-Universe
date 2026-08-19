@@ -49,6 +49,9 @@ from .registry import settings_for, spec
 CONFIG_NAME = "config.yaml"
 
 # blocks that describe the one account / one market a merged run shares
+# Blocks a run has only one of. With an `instruments:` block these become
+# DEFAULTS that each instrument overrides, so two engine configs may name
+# different symbols as long as they agree on the instrument definitions.
 SHARED_BLOCKS = ("symbol", "databento", "mt5")
 SHARED_SCALARS = ("server_timezone", "server_utc_offset_hours")
 # per-run, so excluded from the agreement check
@@ -205,12 +208,19 @@ class RunConfig:
     def run_name(self, overrides: Optional[Dict[str, Any]] = None) -> str:
         app = self.app_config(overrides)
         sessions = app.enabled_sessions()
+        # The instrument leads the name. Without it, GC and ES run with the
+        # same engine and settings produce the SAME folder and overwrite each
+        # other. Blank for a single-instrument run, so existing names are
+        # unchanged and old results stay where they are.
+        from .outputs import instruments_of
+        tag = instruments_of(app)
+        head = [tag.upper()] if tag else []
         if len(sessions) != 1:
-            return f"{self.engine}_{len(sessions)}sessions"
+            return "_".join(head + [f"{self.engine}_{len(sessions)}sessions"])
         s = sessions[0]
         minutes = _window_minutes(s.range_start, s.range_end)
-        parts = [s.signal_timeframe, (s.name or "MAIN").upper(),
-                 f"ORB{minutes}", f"RR{s.risk_reward:g}"]
+        parts = head + [s.signal_timeframe, (s.name or "MAIN").upper(),
+                        f"ORB{minutes}", f"RR{s.risk_reward:g}"]
         settings = settings_for(s.engine, s.engine_options)
         tail = getattr(settings, "run_name", None)
         if callable(tail):
@@ -221,9 +231,43 @@ class RunConfig:
         return "_".join(parts).replace(".", "p")
 
     # ------------------------------------------------------------------
+    def sweep_instruments(self,
+                          overrides: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Which instruments this sweep covers, in order.
+
+        `[""]` — one unnamed instrument — is what a config without an
+        `instruments:` block means, and it is what every sweep written before
+        multi-instrument support produced. Nothing about those sweeps changes.
+        """
+        w = dict(self.sweep)
+        w.update({k: v for k, v in (overrides or {}).items() if v is not None})
+        names = [str(x).strip() for x in (w.get("instruments") or [])
+                 if str(x).strip()]
+        if not names:
+            # Default to what the file actually trades — the instruments its
+            # ENABLED sessions name — not to everything declared. A config may
+            # declare markets whose data has not been downloaded yet (a 3x3
+            # session matrix with most cells off is the normal case), and
+            # sweeping those would triple the run and then fail on a missing
+            # file. Falls back to every declared instrument when no session
+            # names one, which is the single-instrument case.
+            names = sorted({(x.instrument or "").strip()
+                            for x in self.app.enabled_sessions()} - {""})
+        if not names:
+            names = [str(x).strip() for x in (self.app.instruments or {})]
+        return names or [""]
+
     def sweep_items(self, overrides: Optional[Dict[str, Any]] = None):
         """The grid described by `sweep:`, built by this engine's own
-        `grid.build()`."""
+        `grid.build()`.
+
+        An engine's `grid.build()` knows nothing about instruments — it varies
+        strategy parameters. Instruments are therefore an OUTER loop applied
+        here: the same grid is built once per instrument, over a base config
+        narrowed to that instrument alone. So `--instruments gc,es` on a 54-point
+        grid gives 108 runs, each row tagged with the instrument it traded, and
+        a single-instrument sweep is byte-for-byte what it always was.
+        """
         import copy
         import importlib
         w = dict(self.sweep)
@@ -236,7 +280,7 @@ class RunConfig:
         grid = importlib.import_module(f"{module}.grid")
         kwargs: Dict[str, Any] = {}
         for key, value in w.items():
-            if key in ("out_dir", "save_trades") or value is None:
+            if key in ("out_dir", "save_trades", "instruments") or value is None:
                 continue
             if key == "news":
                 kwargs["news_modes"] = [NEWS_LABELS[news_mode(x, "sweep")]
@@ -245,14 +289,58 @@ class RunConfig:
                 kwargs["sessions"] = [str(x).upper() for x in value]
             else:
                 kwargs[key] = list(value)
-        return grid.build(base, **kwargs)
+
+        names = self.sweep_instruments(overrides)
+        if names == [""]:
+            return grid.build(base, **kwargs)
+
+        declared = base.instruments or {}
+        unknown = [n for n in names if n not in declared]
+        if unknown:
+            raise ValueError(
+                f"Unknown instrument(s) {sorted(unknown)} in the sweep. "
+                f"Declared in {os.path.basename(self.path)}: "
+                f"{sorted(declared)}.")
+
+        # A single-instrument sweep keeps the run names it always had; the
+        # prefix only earns its place when there is more than one instrument
+        # to tell apart.
+        prefix = len(names) > 1
+        out = []
+        for name in names:
+            one = copy.deepcopy(base)
+            # Narrow to this instrument WITHOUT `select_instruments`: that
+            # method disables sessions belonging to other instruments and
+            # refuses to leave none enabled, which is right for a real run but
+            # wrong here — `grid.build` replaces the sessions block outright
+            # with its own single generated session.
+            one.instruments = {name: copy.deepcopy(declared[name])}
+            one.strategy.instrument = name
+            if declared[name].data:
+                one.backtest.dbn_paths = list(declared[name].data)
+            for item in grid.build(one, **kwargs):
+                if prefix:
+                    item.run_name = f"{name}_{item.run_name}"
+                    item.cfg.strategy.name = item.run_name
+                    item.cfg.sessions = {item.run_name: item.cfg.strategy}
+                # The generated session must name its instrument, because the
+                # bars carry that tag and `MultiEngine` routes on it.
+                item.cfg.strategy.instrument = name
+                item.axes = dict(item.axes or {}, instrument=name)
+                out.append(item)
+        return out
 
     def sweep_size(self, overrides: Optional[Dict[str, Any]] = None) -> int:
+        """How many backtests the grid comes to, without building it.
+
+        Instruments multiply like any other axis, because `sweep_items` runs
+        the whole parameter grid once per instrument.
+        """
         w = dict(self.sweep)
         w.update({k: v for k, v in (overrides or {}).items() if v is not None})
-        total = 1
+        total = len(self.sweep_instruments(overrides))
         for key, value in w.items():
-            if key in ("out_dir", "save_trades") or value is None:
+            if key in ("out_dir", "save_trades", "instruments") or value is None:
                 continue
             total *= max(1, len(value))
         return total
@@ -294,6 +382,8 @@ def merge(configs: Iterable[RunConfig]) -> AppConfig:
     _assert_shared_blocks_agree(configs)
 
     merged = copy.deepcopy(first.app)
+    # every instrument any engine declared — see `_merge_instruments`
+    merged.instruments = copy.deepcopy(_merge_instruments(configs))
     merged.sessions = {}
     seen_magic: Dict[int, str] = {}
     for rc in configs:
@@ -326,6 +416,30 @@ def merged_dates(configs: Sequence[RunConfig]) -> tuple:
     """The widest period the merged configs agree to cover."""
     starts, ends = zip(*(rc.dates() for rc in configs))
     return min(starts), max(ends)
+
+
+def _merge_instruments(configs) -> dict:
+    """Every instrument declared across the engine configs, as one mapping.
+
+    Two engines may legitimately declare the same instrument — `orb` trades
+    gold in New York and `orb_reverse` fades it in London — so identical
+    definitions merge silently. Two DIFFERENT definitions under one name is a
+    mistake worth stopping: the sessions would disagree about what they are
+    trading while sharing a name.
+    """
+    out, seen_in = {}, {}
+    for rc in configs:
+        for key, inst in (rc.app.instruments or {}).items():
+            if key in out and asdict(out[key]) != asdict(inst):
+                raise SystemExit(
+                    f"Instrument '{key}' is defined differently in "
+                    f"{os.path.relpath(seen_in[key])} and "
+                    f"{os.path.relpath(rc.path)}. One name must mean one "
+                    f"instrument — give them different keys, or make the two "
+                    f"definitions identical.")
+            out.setdefault(key, inst)
+            seen_in.setdefault(key, rc.path)
+    return out
 
 
 def _assert_shared_blocks_agree(configs: Sequence[RunConfig]) -> None:

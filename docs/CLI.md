@@ -83,6 +83,7 @@ at the project root, which is git-ignored. See `.env.example`.
 
 | Flag | Default | What it does |
 |---|---|---|
+| `--instrument` | `` | Which instrument this session trades — a key in the `instruments:` block, e.g. gc or es. Blank means the run's single instrument. |
 | `--engine` | `orb` | Which strategy engine this session runs — a name registered in orb/engines/, e.g. orb or orb_reverse. Each session may use a different one; they run side by side. |
 | `--range-start` | `09:00` | Range window start, HH:MM. |
 | `--range-end` | `10:00` | Range window end, HH:MM. |

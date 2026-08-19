@@ -35,6 +35,16 @@ from orb.live_trader import LiveTrader                     # noqa: E402
 from orb.logger import RbeaLogger                          # noqa: E402
 from orb.runconfig import RunConfig                        # noqa: E402
 
+def in_window(session, window: str) -> bool:
+    """Does this session belong to that WINDOW?
+
+    A window trading several instruments expands to one session per cell —
+    `london_gc`, `london_es` — so a test meaning "the London window" cannot
+    match on the bare name any more. These tests drive gold's synthetic bars,
+    so they want the gc cell.
+    """
+    name = session.name or ""
+    return name == window or name.startswith(window + "_")
 SERVER_NOW = datetime(2026, 8, 18, 9, 20)
 MAGIC = 20260903
 
@@ -91,7 +101,7 @@ class Broker(SimBroker):
 def trader_with(deals):
     cfg = RunConfig.load("orb_reverse").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "london")
+        s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
     cfg.mt5.symbol = "XAUUSDm"
 
     class Feed:

@@ -32,6 +32,7 @@ script.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import multiprocessing as mp
 import os
@@ -42,8 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd                                            # noqa: E402
 
-from orb.backtest import make_clock, run_backtest              # noqa: E402
-from orb.data.dbn import load_dbn_bars                         # noqa: E402
+from orb.backtest import (load_instrument_bars, make_clock,     # noqa: E402
+                          run_backtest)
 from orb.logger import RbeaLogger                              # noqa: E402
 from orb.report import compute_stats, trades_dataframe         # noqa: E402
 
@@ -56,7 +57,8 @@ _SAVE_TRADES = False
 
 
 # --------------------------------------------------------------------------
-def _init_worker(engine, cfg_path, over, start, end, data, save_trades):
+def _init_worker(engine, cfg_path, over, start, end, data, save_trades,
+                 instruments=None):
     """Set up a worker process.
 
     Windows (and macOS) start worker processes with `spawn`, which does NOT
@@ -74,16 +76,27 @@ def _init_worker(engine, cfg_path, over, start, end, data, save_trades):
     rc.period["start"], rc.period["end"] = start, end
     if data:
         rc.period["data"] = data
+    if instruments:
+        rc.sweep["instruments"] = list(instruments)
     _ITEMS = rc.sweep_items(over)
+
+    # Bars are loaded ONCE per worker and shared by every configuration, so
+    # they have to cover every instrument in the grid, not just the first
+    # item's. `load_instrument_bars` tags each bar with its instrument and
+    # merges the streams in time order; `MultiEngine` then routes each bar to
+    # the session that trades it, so a run only ever sees its own instrument.
+    names = rc.sweep_instruments(over)
     app = _ITEMS[0].cfg
-    d = app.databento
-    _BARS = load_dbn_bars(app.backtest.dbn_paths, make_clock(app),
-                          contract_mode=d.contract_mode,
-                          contract_symbol=d.contract_symbol,
-                          include_spreads=d.include_spreads,
-                          roll_min_volume=d.roll_min_volume,
-                          roll_boundary_hour=d.roll_boundary_hour,
-                          start=start, end=end, logger=RbeaLogger(level=0))
+    if len(names) > 1:
+        # Every instrument in the GRID, named explicitly. Inferring them from
+        # the first item's enabled session would load only that item's
+        # instrument, and the rest of the grid would then run on the wrong
+        # market's bars.
+        app = copy.deepcopy(app)
+        app.instruments = {n: rc.app.instruments[n] for n in names}
+    _BARS = load_instrument_bars(app, make_clock(app), start=start, end=end,
+                                 logger=RbeaLogger(level=0),
+                                 instruments=(names if len(names) > 1 else None))
 
 
 def _floats(s):
@@ -161,6 +174,13 @@ def main() -> int:
     g.add_argument("--start", default=None)
     g.add_argument("--end", default=None)
     g.add_argument("--data", "-d", nargs="+", default=None)
+    g.add_argument("--instruments", "-i", default=None, metavar="A,B",
+                   help="which instruments to sweep, comma separated, e.g. "
+                        "gc,es. Names come from the `instruments:` block of "
+                        "the engine's config. Each instrument gets the WHOLE "
+                        "parameter grid, so two instruments is twice the runs, "
+                        "and every result row carries an `instrument` column. "
+                        "Omit to sweep every declared instrument.")
     g.add_argument("--out", default=None)
     g.add_argument("--trades", action="store_true",
                    help="write a trades CSV per configuration")
@@ -198,12 +218,17 @@ def main() -> int:
         rc.period["end"] = a.end
     if a.data:
         rc.period["data"] = a.data
+    if a.instruments:
+        rc.sweep["instruments"] = [x.strip() for x in a.instruments.split(",")
+                                   if x.strip()]
 
     over = {"sessions": _strs(a.sessions), "timeframes": _strs(a.timeframes),
             "orb_minutes": _ints(a.orb_minutes),
             "risk_reward": _floats(a.risk_reward), "news": _strs(a.news)}
     over = {k: v for k, v in over.items() if v is not None}
-    valid_axes = set(rc.sweep) - {"out_dir", "save_trades"}
+    # `instruments` is handled here, not by an engine's grid, so it is never
+    # a --set axis.
+    valid_axes = set(rc.sweep) - {"out_dir", "save_trades", "instruments"}
     # The shorthand flags above (--session/--tf/--orb/--rr/--news) name axes
     # too, so they get the same check --set gets below. Both engines have all
     # five today; an engine that omits one should say so, not sweep a phantom.
@@ -235,8 +260,12 @@ def main() -> int:
     print("=" * 74)
     print(f"  engine         {a.engine}")
     print(f"  config file    {os.path.relpath(rc.path)}")
-    for key in sorted(k for k in w if k not in ("out_dir", "save_trades")):
+    for key in sorted(k for k in w
+                      if k not in ("out_dir", "save_trades", "instruments")):
         print(f"  {key:<16} {w[key]}")
+    names = rc.sweep_instruments(over)
+    if names != [""]:
+        print(f"  {'instruments':<16} {names}")
     print(f"  period         {start} .. {end}")
     print(f"  output         {out}/")
     print(f"\n  {n:,} configurations   ~{n * 4 / max(1, a.jobs) / 60:.0f} min "
@@ -274,15 +303,17 @@ def main() -> int:
     # range, then drop it: the workers load their own copies (see
     # `_init_worker` — spawn does not inherit memory).
     base_app = items[0].cfg
-    d = base_app.databento
+    names = rc.sweep_instruments(over)
+    if len(names) > 1:
+        # every instrument in the grid, so the probe measures what a worker
+        # will really hold in memory rather than just the first one's share
+        base_app = copy.deepcopy(base_app)
+        base_app.instruments = {n: rc.app.instruments[n] for n in names}
     print("Loading bars ...", flush=True)
-    probe = load_dbn_bars(base_app.backtest.dbn_paths, make_clock(base_app),
-                          contract_mode=d.contract_mode,
-                          contract_symbol=d.contract_symbol,
-                          include_spreads=d.include_spreads,
-                          roll_min_volume=d.roll_min_volume,
-                          roll_boundary_hour=d.roll_boundary_hour,
-                          start=start, end=end, logger=RbeaLogger(level=0))
+    probe = load_instrument_bars(base_app, make_clock(base_app),
+                                 start=start, end=end,
+                                 logger=RbeaLogger(level=0),
+                                 instruments=(names if len(names) > 1 else None))
     n_bars, first, last = len(probe), probe[0].time, probe[-1].time
     del probe
     print(f"  {n_bars:,} bars  {first:%Y-%m-%d %H:%M} .. {last:%Y-%m-%d %H:%M}"
@@ -302,7 +333,7 @@ def main() -> int:
 
     rows, done, t0 = list(done_rows), 0, time.time()
     init_args = (a.engine, a.config, over, start, end, rc.period.get("data"),
-                 _SAVE_TRADES)
+                 _SAVE_TRADES, rc.sweep.get("instruments"))
     # "spawn" on every platform, so the behaviour that is tested is the
     # behaviour that runs. Windows and macOS have no choice; forcing it on
     # Linux too means one code path instead of two.
@@ -348,7 +379,8 @@ def main() -> int:
         }).sort_values("total_r", ascending=False)
 
     # one table per axis the engine actually has, plus the pairs that exist
-    singles = [("session", "by_session"),
+    singles = [("instrument", "by_instrument"),
+               ("session", "by_session"),
                ("signal_timeframe", "by_timeframe"),
                ("orb_minutes", "by_orb_duration"),
                ("news_mode", "by_news_mode"),
@@ -357,7 +389,9 @@ def main() -> int:
                ("sl_range_mult", "by_sl_multiplier"),
                ("max_trades_per_session", "by_trade_cap"),
                ("direction", "by_direction")]
-    pairs = [(["sl_range_mult", "risk_reward"], "by_sl_mult_x_rr"),
+    pairs = [(["instrument", "risk_reward"], "by_instrument_x_rr"),
+             (["instrument", "session"], "by_instrument_x_session"),
+             (["sl_range_mult", "risk_reward"], "by_sl_mult_x_rr"),
              (["sl_range_mult", "direction"], "by_sl_mult_x_direction"),
              (["sl_range_mult", "max_trades_per_session"], "by_sl_mult_x_cap"),
              (["signal_timeframe", "session"], "by_timeframe_session")]
@@ -389,11 +423,23 @@ def main() -> int:
                "configurations": len(rows),
                "axes": {k: v for k, v in w.items()
                         if k not in ("out_dir", "save_trades")},
+               "instruments": rc.sweep_instruments(over),
                "options": (rc.settings().to_options()
                            if rc.settings() is not None else {}),
                "runner": "orb.backtest.run_backtest, engine selected per "
                          "session through orb/registry.py"},
               open(os.path.join(summary, "run_info.json"), "w"), indent=2)
+
+    # With more than one instrument, which market earned it is the first
+    # question — before which parameter did. So it prints first.
+    if "instrument" in df.columns and df.instrument.nunique() > 1:
+        print("\n" + "=" * 78)
+        print("  BY INSTRUMENT")
+        print("  net P&L is NOT comparable across instruments at a fixed lot "
+              "size — a point is\n  worth a different amount on each. Compare "
+              "avg_r and win rate.")
+        print("=" * 78)
+        print(agg("instrument").round(2).to_string())
 
     print("\n" + "=" * 78)
     headline = ("sl_range_mult" if "sl_range_mult" in df.columns

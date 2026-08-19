@@ -38,7 +38,13 @@ class Engine:
                  store: Optional[BarStore] = None,
                  strategy_cls: Optional[type] = None):
         self.cfg = cfg
-        self.broker = broker
+        #: the broker as THIS session sees it — bound to its instrument, so
+        #: every `broker.ask()` / `positions_count()` / `open_market()` the
+        #: strategy makes is scoped without the strategy knowing instruments
+        #: exist. A single-instrument run gets the account broker unchanged.
+        view = getattr(broker, "view", None)
+        self.broker = (view(cfg.instrument) if callable(view) and cfg.instrument
+                       else broker)
         # Every line this session writes is tagged with its name. Bound once,
         # here, rather than at 78 call sites — so a line added later cannot
         # forget to say which session it belongs to. With several engines
@@ -68,7 +74,7 @@ class Engine:
         # engines in one process; before, a second engine could only be reached
         # by rebinding a module global, which applied to every session at once.
         cls = strategy_cls or resolve_engine(cfg.engine)
-        self.strategy = cls(cfg, broker, store=self.store, logger=self.log)
+        self.strategy = cls(cfg, self.broker, store=self.store, logger=self.log)
         # optional hook called once per tick, after the EA's own housekeeping
         # (live mode uses it to journal server-side exits)
         self.after_tick = None
@@ -276,6 +282,21 @@ class MultiEngine:
                           f"{cfg.range_start}-{cfg.range_end} -> "
                           f"{cfg.stop_time} | magic {cfg.magic} ---")
             self.engines.append(Engine(cfg, broker, logger=self.log))
+        # the one instrument every session trades, or None when they differ.
+        # See `engines_for` for why an untagged bar needs it.
+        # Does this run trade exactly ONE instrument? Note the flag is separate
+        # from the name: a config with no `instruments:` block at all is also a
+        # single-instrument run, and its name is the empty string — so the name
+        # alone cannot answer the question.
+        used = {(e.cfg.instrument or "") for e in self.engines}
+        self._single_instrument = (len(used) == 1)
+        self._only_instrument = next(iter(used)) if self._single_instrument else ""
+        #: how many bars actually reached an engine, and the tags of those that
+        #: reached none. `run_backtest` reads both to tell "this market was
+        #: quiet" apart from "these bars were never this run's".
+        self._routed = 0
+        self._skipped_tags: set = set()
+
         names = ", ".join(f"{e.cfg.name or 'MAIN'} ({e.cfg.engine})"
                           for e in self.engines)
         self.log.info(f"{len(self.engines)} session(s) enabled: {names}")
@@ -286,20 +307,78 @@ class MultiEngine:
 
     # ------------------------------------------------------------------
     def on_bar(self, bar: Bar, now: datetime) -> None:
+        """One base bar, to the sessions that trade ITS instrument.
+
+        An untagged bar goes to every session — that is a single-instrument
+        run, where there is only one thing it could be. A tagged bar goes only
+        to matching sessions, because feeding a GC bar into an ES resampler
+        would merge two unrelated instruments into one candle.
+        """
+        targets = self.engines_for(bar)     # also resolves an untagged bar
         self.broker.sync_market(bar, now)
-        for e in self.engines:
+        for e in targets:
             e.feed(bar, now)
         self.broker.settle_bar(bar)
+
+    def engines_for(self, bar: Bar):
+        """The engines this bar belongs to.
+
+        A TAGGED bar is routed on its tag and nothing else. It is NEVER
+        re-tagged, however few instruments this run trades: a bar that says it
+        is ES is ES, and quietly relabelling it is the worst outcome available
+        here — a run that looks healthy and reports another market's trades.
+
+        That is not hypothetical. An earlier version DID re-tag, a sweep handed
+        every configuration the FIRST instrument's bars, and ES and NQ came back
+        byte-identical: same 311 trades, same 45.34% win rate, same $343.10 net.
+        Nothing flagged it.
+
+        A bar matching no engine is skipped — a merged multi-instrument stream
+        legitimately carries bars this run does not trade. If NOTHING ever
+        matches, `run_backtest` raises rather than reporting zero trades, so a
+        mismatch cannot pass for a flat month.
+
+        An UNTAGGED bar is adopted when the run trades exactly one instrument,
+        whatever it is called. A single-instrument run must behave identically
+        whether or not the instrument happens to be named — otherwise merely
+        adding an `instruments:` block would change results, and every caller
+        that builds bars by hand (the golden master, the tests, `run_backtest`
+        on a plain list) would stop trading, because the broker would be
+        pricing an instrument no bar ever mentioned.
+
+        An untagged bar in a run trading SEVERAL instruments is unanswerable:
+        nothing says which market it describes and the broker cannot price it.
+        That is an error naming the fix.
+        """
+        tag = getattr(bar, "instrument", "") or ""
+        if not tag:
+            if not self._single_instrument:
+                raise ValueError(
+                    f"A bar at {bar.time:%Y-%m-%d %H:%M} carries no instrument, "
+                    f"but this run trades "
+                    f"{sorted({(e.cfg.instrument or '?') for e in self.engines})}"
+                    f" — so there is no way to tell which market it describes."
+                    f"\nLoad bars with "
+                    f"`orb.backtest.load_instrument_bars(cfg, ...)`, which tags "
+                    f"each instrument's stream, rather than `load_dbn_bars`, "
+                    f"which cannot know.")
+            bar.instrument = tag = self._only_instrument
+        targets = [e for e in self.engines if (e.cfg.instrument or "") == tag]
+        if targets:
+            self._routed += 1
+        else:
+            self._skipped_tags.add(tag)
+        return targets
 
     def on_idle(self, now: datetime) -> None:
         for e in self.engines:
             e.on_idle(now)
 
     def warmup_bar(self, bar: Bar) -> None:
-        """Seed every session's history. Each session has its own resampler and
-        its own timeframe, so one shared warm-up pass would be wrong — the bar
-        has to go through all of them."""
-        for e in self.engines:
+        """Seed each session's history. Every session has its own resampler and
+        its own timeframe, so one shared warm-up pass would be wrong — and a
+        bar must only seed the sessions trading its instrument."""
+        for e in self.engines_for(bar):
             e.warmup_bar(bar)
 
     def flush(self) -> None:

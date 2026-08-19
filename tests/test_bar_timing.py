@@ -53,6 +53,16 @@ from orb.live_trader import LiveTrader                     # noqa: E402
 from orb.logger import RbeaLogger                          # noqa: E402
 from orb.runconfig import RunConfig                        # noqa: E402
 
+def in_window(session, window: str) -> bool:
+    """Does this session belong to that WINDOW?
+
+    A window trading several instruments expands to one session per cell —
+    `london_gc`, `london_es` — so a test meaning "the London window" cannot
+    match on the bare name any more. These tests drive gold's synthetic bars,
+    so they want the gc cell.
+    """
+    name = session.name or ""
+    return name == window or name.startswith(window + "_")
 BASE = datetime(2026, 8, 18)
 NEVER = 10 ** 9          # a grace so long the clock-close can never fire
 
@@ -136,7 +146,7 @@ def live_run(grace, bars=None, eager=True):
     try:
         cfg = RunConfig.load("orb_reverse").app_config({})
         for s in cfg.sessions.values():
-            s.enabled = (s.name == "london")
+            s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
             if s.enabled:
                 s.signal_timeframe = "M1"
                 s.range_start, s.range_end = "03:00", "03:01"
@@ -233,7 +243,7 @@ def test_a_bar_priced_broker_never_closes_early():
     assert MT5Broker.__init__ is not None          # flag is set in __init__
     cfg = RunConfig.load("orb_reverse").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "london")
+        s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
 
     class Feed0:
         def start(self): pass
@@ -254,7 +264,7 @@ def test_a_backtest_never_closes_a_bar_early():
     from orb.engine import MultiEngine
     cfg = RunConfig.load("orb_reverse").app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == "london")
+        s.enabled = in_window(s, "london") and (s.instrument or "gc") == "gc"
     engine = MultiEngine(cfg.enabled_sessions(),
                          SimBroker(cfg.symbol, 100000.0),
                          logger=RbeaLogger(level=0))

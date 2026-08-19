@@ -35,6 +35,16 @@ from orb.bars import Bar                                   # noqa: E402
 from orb.logger import SOURCE_WIDTH, RbeaLogger            # noqa: E402
 from orb.runconfig import RunConfig                        # noqa: E402
 
+def in_window(session, window: str) -> bool:
+    """Does this session belong to that WINDOW?
+
+    A window trading several instruments expands to one session per cell —
+    `london_gc`, `london_es` — so a test meaning "the London window" cannot
+    match on the bare name any more. These tests drive gold's synthetic bars,
+    so they want the gc cell.
+    """
+    name = session.name or ""
+    return name == window or name.startswith(window + "_")
 BASE = datetime(2026, 8, 18)
 
 
@@ -57,7 +67,7 @@ class Capture(RbeaLogger):
 def journal(bars=None, session="london", engine="orb_reverse"):
     cfg = RunConfig.load(engine).app_config({})
     for s in cfg.sessions.values():
-        s.enabled = (s.name == session)
+        s.enabled = in_window(s, session) and (s.instrument or "gc") == "gc"
         if s.enabled:
             s.signal_timeframe = "M1"
             s.range_start, s.range_end, s.stop_time = "03:00", "03:01", "09:30"

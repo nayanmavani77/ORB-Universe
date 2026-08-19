@@ -44,6 +44,22 @@ ROOT = "backtest"
 MIXED = "mixed"
 
 
+def instruments_of(cfg) -> str:
+    """A short tag naming what a run traded, for the folder name.
+
+    Without it, GC and ES run with the same engine and settings would land in
+    the SAME folder and overwrite each other.
+    """
+    try:
+        names = sorted({str(s.instrument or "").strip()
+                        for s in cfg.enabled_sessions()} - {""})
+    except Exception:
+        return ""
+    if not names:
+        return ""
+    return "-".join(names) if len(names) <= 3 else f"{len(names)}instruments"
+
+
 def engine_of(cfg) -> str:
     """The engine folder name for an `AppConfig`.
 

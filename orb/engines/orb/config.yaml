@@ -57,6 +57,93 @@ server_timezone: "America/New_York"     # set to null to use the offset below
 server_utc_offset_hours: 0              # ignored while server_timezone is set
 
 # ===========================================================================
+# 1b  INSTRUMENTS  —  WHAT to trade
+# ===========================================================================
+# One entry per tradeable instrument. Four lines each:
+#
+#   signal          the Databento parent symbol the SIGNAL is built from
+#   mt5             the symbol in YOUR terminal the ORDER is sent to
+#   value_per_point money per 1.0 of price movement, per 1.0 lot
+#   data            bar files for the backtest
+#
+# `signal` and `mt5` are deliberately separate. The strategy reads CME futures
+# and the order goes to a CFD, and the two quote tens of dollars apart —
+# XAUUSD sits about $56 below GC. `translate_levels` (default true) carries the
+# SL and TP across as DISTANCES from the real fill, never as absolute levels.
+#
+# Every session below names one with `instrument:`. Sessions on DIFFERENT
+# instruments MAY share a clock window — GC New York and ES New York are the
+# same hours by definition — and each instrument holds its own position, on one
+# shared account balance. Two sessions on the SAME instrument still may not
+# overlap: they would fight over one position slot.
+#
+# Everything else — digits, tick size, volume limits — is read from MT5 when
+# live and overrides whatever is set here, so adding an instrument really is
+# just these four lines.
+#
+# From the terminal:
+#   --instruments gc,es       trade only these this run
+#   python tools\mt5_check.py --deals    check the mapping reaches the terminal
+instruments:
+
+  # `value_per_point` and the `volume_*` rules were read from the terminal with
+  #   python tools\mt5_check.py --suggest XAUUSDm,US500m,USTECm
+  # Re-run that if you change broker or account type: how much a point pays and
+  # what lot sizes are legal are the BROKER's, not the exchange's.
+  #
+  # Note what is deliberately NOT copied from the terminal: `digits`, `point`
+  # and `tick_size`. Those describe how PRICES are rounded, and the backtest
+  # prices CME futures, not the broker's CFD. XAUUSDm quotes 3 decimals while
+  # GC futures quote 2 — copying the 3 in moves every stop by a tenth of a cent
+  # and the backtest stops matching the recorded results. Live reads all three
+  # from MT5 at start-up regardless, so setting them here buys nothing.
+
+  gc:
+    signal: "GC.FUT"              # CME gold futures — where the signal comes from
+    mt5:    "XAUUSDm"             # the symbol in your terminal — where it trades
+    value_per_point: 100.0        # 1 lot = 100 oz, so $100 per $1 move
+    data:   ["data/gc_1m_merged.parquet"]
+    volume_min:  0.01
+    volume_step: 0.01
+    volume_max:  200
+
+  es:
+    signal: "ES.FUT"              # CME E-mini S&P 500
+    mt5:    "US500m"
+    value_per_point: 1.0          # this broker's CFD is $1/point, NOT the
+                                  # CME contract's $50 — see the note below
+    data:   ["data/es_1m.parquet"]
+    volume_min:  0.14             # an unusual minimum: the backtest needs it
+    volume_step: 0.01             # or it sizes trades MT5 would round up
+    volume_max:  1000
+
+  nq:
+    signal: "NQ.FUT"              # CME E-mini Nasdaq 100
+    mt5:    "USTECm"
+    value_per_point: 1.0          # again the broker's CFD, not NQ's $20
+    data:   ["data/nq_1m.parquet"]
+    volume_min:  0.05
+    volume_step: 0.01
+    volume_max:  500
+
+  # WHY THE INDEX FIGURES LOOK SMALL
+  # The signal comes from CME futures; the order goes to a broker CFD. Both are
+  # quoted in the same index points, so the number of points a trade wins is the
+  # same on either. But the MONEY per point is the broker's contract, and this
+  # broker pays $1 per point where the CME contract pays $50 (ES) or $20 (NQ).
+  #
+  # That makes risk wildly uneven at equal lot sizes. Measured on 187 real New
+  # York gold trades, Jan-Aug 2026:
+  #
+  #     XAUUSDm   ~15.1 stop x 100/pt  =  $1,510 risk at 1.00 lot
+  #     USTECm    ~138  stop x   1/pt  =  $  138 risk at 1.00 lot
+  #     US500m    ~ 38  stop x   1/pt  =  $   38 risk at 1.00 lot
+  #
+  # Gold risks 40x what US500m does per lot. Left equal, gold would be ~97% of
+  # the P&L and the indices pure noise. So each session sets its own `lots:`
+  # (section 2) to put roughly the same money at risk on every instrument.
+
+# ===========================================================================
 # 2  SESSIONS  —  WHEN to trade
 # ===========================================================================
 # One entry per window. `enabled` switches each on or off. Enabled windows may
@@ -72,6 +159,84 @@ server_utc_offset_hours: 0              # ignored while server_timezone is set
 #   --set sessions.asia.risk_reward=3   change one session's setting
 sessions:
 
+  # ------------------------------------------------------------------------
+  # A session is a WINDOW. Under it, `instruments:` lists which symbols trade
+  # that window — the (session x instrument) matrix.
+  #
+  #   * the ROW holds what the window shares: times, and any setting every
+  #     symbol in it should use
+  #   * each CELL holds what that ONE symbol does differently, and switches
+  #     on and off by itself
+  #   * a cell inherits DEFAULTS -> ROW -> its own lines, in that order
+  #
+  # So one session can run three symbols on different settings, the same symbol
+  # can run in three sessions on different settings, and any single combination
+  # can be switched off without touching its neighbours.
+  #
+  # Each cell becomes one ordinary session named `<session>_<instrument>` —
+  # `new_york_gc`, `london_es` — which is the name you will see in the journal,
+  # the report and the per-session tables. Give a cell `name:` to choose your
+  # own.
+  #
+  # Two cells on DIFFERENT instruments may share a window: each holds its own
+  # position. Two on the SAME instrument may not, in any session — they would
+  # fight over one position slot, and the config is rejected at load.
+  #
+  # `magic` is assigned automatically in declaration order and is stable across
+  # runs, so a restart re-attaches to the same positions. Set it explicitly on
+  # anything already trading live, because inserting a cell ABOVE it would
+  # otherwise shift its number.
+  #
+  # The older flat form — one session naming one `instrument:` — still works
+  # and is unchanged. Use it when a window only ever trades one symbol.
+  # ------------------------------------------------------------------------
+
+  new_york:
+    enabled: true
+    range_start: "09:30"          # New York open
+    range_end:   "10:00"
+    stop_time:   "16:55"          # flat before the 17:00 COMEX halt
+                                  # NOT 17:00 — that is the exact moment COMEX
+                                  # halts, so no tick arrives to trigger the
+                                  # close and the position rides the 17:00-18:00
+                                  # break (and the whole weekend on a Friday).
+    instruments:
+      gc:
+        enabled: false
+        lots: 1.0                 # ~$1,510 risk on a typical stop
+        magic: 20260803  
+      es:
+        enabled: true            # ON once data/es_1m.parquet exists
+        lots: 39               # ~$1,510 risk, to match gold
+        magic: 20260804
+        risk_reward: 2.0
+        sl_mode: mid_range
+        signal_timeframe: "M5"
+        max_trades_per_session: 1
+      nq:
+        enabled: false            # ON once data/nq_1m.parquet exists
+        lots: 10.91               # ~$1,510 risk, to match gold
+        magic: 20260805
+
+  london:
+    enabled: false
+    range_start: "03:00"          # London open
+    range_end:   "03:30"
+    stop_time:   "09:25"          # flat before New York opens
+    instruments:
+      gc:
+        enabled: true
+        lots: 1.0
+        magic: 20260802
+      es:
+        enabled: false
+        lots: 39.48
+        magic: 20260812
+      nq:
+        enabled: false
+        lots: 10.91
+        magic: 20260813
+
   asia:
     # Switch this on and run `--engine orb,orb_reverse` to trade Asia with the
     # breakout while London fades, on one account. Each session keeps the
@@ -80,30 +245,27 @@ sessions:
     range_start: "19:00"          # Asia open
     range_end:   "19:30"
     stop_time:   "02:55"          # flat before London opens
-    magic: 20260801
-    # engine: orb_reverse         # this session could fade instead
+    # engine: orb_reverse         # this whole row could fade instead
     # engine_options:
     #   sl_range_mult: 0.75
     #   direction: reverse
-    #   max_trades_per_session: 2
-
-  london:
-    enabled: false
-    range_start: "03:00"          # London open
-    range_end:   "03:30"
-    stop_time:   "09:25"          # flat before New York opens
-    magic: 20260802
-
-  new_york:
-    enabled: false
-    range_start: "09:30"          # New York open
-    range_end:   "10:00"
-    stop_time:   "16:55"          # flat before the 17:00 COMEX halt
-                                  # NOT 17:00 — that is the exact moment COMEX
-                                  # halts, so no tick arrives to trigger the
-                                  # close and the position rides the 17:00-18:00
-                                  # break (and the whole weekend on a Friday).
-    magic: 20260803
+    instruments:
+      gc:
+        enabled: true
+        lots: 1.0
+        magic: 20260801
+        risk_reward: 2.0
+        sl_mode: mid_range
+        signal_timeframe: "M1"
+        max_trades_per_session: 2  
+      es:
+        enabled: false
+        lots: 39.48
+        magic: 20260822
+      nq:
+        enabled: false
+        lots: 10.91
+        magic: 20260823
 
 
 # ===========================================================================
@@ -117,15 +279,15 @@ sessions:
 defaults:
 
   # --- signal ---
-  signal_timeframe: "M1"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
+  signal_timeframe: "M5"          # InpSignalTF — M1 M5 M15 M30 H1 H4 D1
                                   # the bar that must CLOSE beyond the range
 
   # --- risk ---
   sl_mode: mid_range              # InpSLMode: mid_range | full_range
                                   #   mid_range  — stop at the range midpoint
                                   #   full_range — stop at the opposite side
-  risk_reward: 2.0                # InpRR — target = this x the stop distance
-  lots: 0.1                       # InpLots
+  risk_reward: 4.0                # InpRR — target = this x the stop distance
+  lots: 1.0                       # InpLots
 
   # --- entries ---
   require_range_reentry: true     # InpRequireRangeReentry
@@ -134,7 +296,7 @@ defaults:
                                   #         the next breakout is taken
                                   # false — the very next candle closing
                                   #         outside the range opens a new trade
-  max_trades_per_session: 2       # InpMaxTradesPerSession (0 = unlimited)
+  max_trades_per_session: 0       # InpMaxTradesPerSession (0 = unlimited)
   close_at_stop_time: true        # InpCloseAtStopTime — flatten at stop_time.
                                   # Required when more than one session is on.
 
@@ -381,7 +543,7 @@ backtest:
 #  MetaTrader 5  (live execution only — ignored by the backtester)
 # ===========================================================================
 mt5:
-  symbol: "XAUUSDm"                    # the symbol name inside your MT5 terminal
+  symbol: "GC"                    # the symbol name inside your MT5 terminal
 
   # --- CREDENTIALS ---------------------------------------------------------
   # Your MT5 login, password and server are NOT in this file. They live in
@@ -397,7 +559,7 @@ mt5:
   # in git — anything written here is committed and pushed.
 
   deviation_points: 20            # max slippage allowed on a market order
-  dry_run: false                   # true = log the order, do NOT send it
+  dry_run: true                   # true = log the order, do NOT send it
 
   # The signal is computed on the Databento instrument (CME GC) and executed on
   # the MT5 symbol above (spot XAUUSD). The two track each other but quote tens
