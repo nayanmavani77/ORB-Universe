@@ -275,6 +275,43 @@ defaults:
                                   #         the next breakout is taken
                                   # false — the very next candle closing
                                   #         outside the range opens a new trade
+  pullback_entry: false           # InpPullbackEntry
+                                  # false — enter as soon as a bar CLOSES
+                                  #         outside the range (the original)
+                                  # true  — do not enter on the breakout. Wait
+                                  #         for price to come back and TOUCH
+                                  #         the level it broke, and enter
+                                  #         there:
+                                  #           long  -> touch of the range HIGH
+                                  #           short -> touch of the range LOW
+                                  #
+                                  # A touch is enough — the bar need not close
+                                  # at the level — and the entry fires DURING
+                                  # the bar that is still forming, not after it
+                                  # closes.
+                                  #
+                                  # The stop and target are then measured from
+                                  # the level, so `sl_mode` means the same
+                                  # thing but the distances are usually
+                                  # tighter than from a breakout fill.
+                                  #
+                                  # If price never comes back, the session
+                                  # takes no trade. Nothing is carried into the
+                                  # next session.
+                                  #
+                                  # Per session, and per instrument cell:
+                                  #   london:
+                                  #     pullback_entry: true
+                                  #     instruments:
+                                  #       gc: {}
+                                  #       es: {pullback_entry: false}
+                                  #
+                                  # For one run only: --pullback / --no-pullback
+                                  #
+                                  # LIVE: the simulated broker fills exactly at
+                                  # the level; a real one fills at its quote
+                                  # when the touch is seen, which will usually
+                                  # be a little worse. Size that in.
   max_trades_per_session: 0       # InpMaxTradesPerSession (0 = unlimited)
   close_at_stop_time: true        # InpCloseAtStopTime — flatten at stop_time.
                                   # Required when more than one session is on.

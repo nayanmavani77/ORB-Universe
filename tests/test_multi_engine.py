@@ -462,8 +462,14 @@ def test_merged_run_needs_no_parent_config():
     account. Sessions come from each engine's own file."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
+    # Start from a known state. Leaving whatever the config happens to enable
+    # switched on makes these assertions depend on the user's own tuning
+    # rather than on the merge behaviour they are testing.
+    for rcfg in configs:
+        for sess in rcfg.app.sessions.values():
+            sess.enabled = False
     cell(configs[0].app, "asia").enabled = True
-    cell(configs[0].app, "new_york").enabled = False
+    cell(configs[1].app, "london").enabled = True
     app = merge(configs)
     engines = {s.name: s.engine for s in app.enabled_sessions()}
     assert engines == {"asia_gc": "orb", "london_gc": "orb_reverse"}
@@ -476,8 +482,14 @@ def test_merged_run_trades_both_engines(base, bars):
     """Not just configured — actually traded, by two different strategies."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
+    # Start from a known state. Leaving whatever the config happens to enable
+    # switched on makes these assertions depend on the user's own tuning
+    # rather than on the merge behaviour they are testing.
+    for rcfg in configs:
+        for sess in rcfg.app.sessions.values():
+            sess.enabled = False
     cell(configs[0].app, "asia").enabled = True
-    cell(configs[0].app, "new_york").enabled = False
+    cell(configs[1].app, "london").enabled = True
     app = merge(configs)
     app.backtest.dbn_paths = [DATA]
     for session in app.enabled_sessions():
@@ -508,8 +520,14 @@ def test_merged_run_rejects_a_magic_collision():
     broker once both engines hold positions."""
     from orb.runconfig import RunConfig, merge
     configs = RunConfig.load_many(["orb", "orb_reverse"])
+    # Start from a known state. Leaving whatever the config happens to enable
+    # switched on makes these assertions depend on the user's own tuning
+    # rather than on the merge behaviour they are testing.
+    for rcfg in configs:
+        for sess in rcfg.app.sessions.values():
+            sess.enabled = False
     cell(configs[0].app, "asia").enabled = True
-    cell(configs[0].app, "new_york").enabled = False
+    cell(configs[1].app, "london").enabled = True
     cell(configs[1].app, "london").magic = cell(configs[0].app, "asia").magic
     with pytest.raises(SystemExit) as exc:
         merge(configs)
@@ -523,13 +541,16 @@ def test_a_session_can_name_a_different_engine_in_one_file():
     rc = RunConfig.load("orb")
     app = copy.deepcopy(rc.app)
     asia = cell(app, "asia")
-    asia.enabled = True
+    ny = cell(app, "new_york")
+    # both explicitly ON: which sessions the shipped config enables is a
+    # setting, and this test is about the per-session `engine:` override
+    asia.enabled = ny.enabled = True
     asia.engine = "orb_reverse"
     asia.engine_options = {"sl_range_mult": 0.5}
     app.validate_sessions()
     engines = {s.name: s.engine for s in app.enabled_sessions()}
     assert engines[asia.name] == "orb_reverse"
-    assert engines[cell(app, "new_york").name] == "orb"
+    assert engines[ny.name] == "orb"
 
 
 # ==========================================================================

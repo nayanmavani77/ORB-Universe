@@ -55,6 +55,15 @@ ENGINE_CONFIG = os.path.join(
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DIR = os.path.join(REPO, "golden_master")
 DATA = os.path.join(REPO, "data", "gc_1m_merged.parquet")
+#: The instrument every case trades. PINNED, not inherited from the config.
+#:
+#: The baseline must not move because someone enabled a different session in
+#: their own config file. It did: with `new_york_es` switched on, the generated
+#: single-session cases inherited `es` from the first enabled session, tagged
+#: the shared gold bars `es`, and the multi-session cases — which are gold —
+#: then matched nothing at all. The data here is gold, so the cases are gold,
+#: and the config's own switches cannot change that.
+INSTRUMENT = "gc"
 START, END = "2026-01-01", "2026-08-13"
 
 # the fields that describe what the strategy DID — everything else is cosmetic
@@ -80,7 +89,7 @@ def _breakout(base: AppConfig, session: str, tf: str, orb: int, rr: float,
     import copy
     cfg = copy.deepcopy(base)
     open_t, stop_t = WINDOWS[session]
-    s = cfg.use_single_session(f"{session}")
+    s = cfg.use_single_session(f"{session}", INSTRUMENT)
     s.signal_timeframe = tf
     s.range_start, s.range_end, s.stop_time = open_t, _hhmm_plus(open_t, orb), stop_t
     s.risk_reward, s.sl_mode = float(rr), sl_mode
@@ -92,27 +101,53 @@ def _breakout(base: AppConfig, session: str, tf: str, orb: int, rr: float,
     return cfg
 
 
-def _multi(base: AppConfig, tf: str = "M5", instrument: str = "gc"):
+def _multi(base: AppConfig, tf: str = "M5", instrument: str = INSTRUMENT):
     """All three WINDOWS at once, on one instrument — the fan-out path, the one
     most at risk.
 
-    Scoped to a single instrument on purpose. The bars here come from
-    `load_dbn_bars`, which loads one file and cannot tag what it loads, so a
-    run spanning several instruments would have no way to route them. It is
-    also what the case has always meant: Asia, London and New York competing
-    for one position slot on one account.
+    Every setting is PINNED here, exactly as `_breakout` pins its own. Nothing
+    is read from the config's `sessions:` block.
 
-    Once a config declares a (session x instrument) matrix, "every session" is
-    every CELL — three windows times three symbols. Enabling all nine would
-    change the case into something else and quietly need two data files it was
-    never given.
+    That is the whole point of a baseline: it must answer "did the CODE change
+    behaviour", not "did the user change settings". It used to read the config's
+    sessions, and so it moved whenever anyone tuned one — switching Asia to M1
+    and R:R 2 turned this case red with no code change at all. A safety net that
+    cries wolf when you edit your own config is a safety net people learn to
+    ignore, which is the worst state for it to be in.
+
+    Scoped to a single instrument on purpose, too: the bars come from
+    `load_dbn_bars`, which loads one file and cannot tag what it loads, so a run
+    spanning several instruments would have no way to route them.
     """
     import copy
     cfg = copy.deepcopy(base)
-    for name, sess in cfg.sessions.items():
-        sess.enabled = (sess.instrument or instrument) == instrument
-        sess.signal_timeframe = tf
-        sess.log_level = "none"
+    sessions = {}
+    for name in ("ASIA", "LONDON", "NEW_YORK"):
+        open_t, stop_t = WINDOWS[name]
+        s = copy.deepcopy(cfg.strategy)
+        s.name = name.lower()
+        s.enabled = True
+        s.instrument = instrument
+        s.engine = "orb"
+        s.engine_options = {}
+        s.signal_timeframe = tf
+        s.range_start = open_t
+        s.range_end = _hhmm_plus(open_t, 30)
+        s.stop_time = stop_t
+        s.risk_reward = 4.0
+        s.sl_mode = "mid_range"
+        s.lots = 1.0
+        s.max_trades_per_session = 0
+        s.pullback_entry = False
+        s.require_range_reentry = True
+        s.close_at_stop_time = True
+        s.log_level = "none"
+        s.magic = 900000 + len(sessions)
+        for _k, _l, cat in s.news.items():
+            cat.mode = "off"
+        s.news_days, s.news_trading = "", "off"
+        sessions[s.name] = s
+    cfg.sessions = sessions
     cfg.validate_sessions()
     return cfg
 

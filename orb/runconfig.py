@@ -513,6 +513,11 @@ def _apply_run_overrides(session: StrategyConfig, o: Dict[str, Any],
         # trades took 6. Exposed as a flag here so `--set` never has to reach
         # for it (which `EngineSettings.from_options` correctly refuses).
         session.max_trades_per_session = int(o["max_trades_per_session"])
+    if o.get("pullback_entry") is not None:
+        # Also a SESSION field, for the same reason as the cap above: the core
+        # enforces it, so `--set` (which reaches engine options) must not be
+        # the way to set it.
+        session.pullback_entry = bool(o["pullback_entry"])
     if o.get("log_level"):
         session.log_level = str(o["log_level"])
     if o.get("news"):

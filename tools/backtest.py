@@ -127,6 +127,7 @@ FLAG_NAMES = {
     "risk_reward": "--rr", "lots": "--lots", "news": "--news",
     "instruments": "--instruments",
     "max_trades_per_session": "--max-trades",
+    "pullback_entry": "--pullback",
     "options": "--set", "sl_mult": "--sl-mult",
     "forward": "--forward", "reverse": "--reverse",
 }
@@ -167,6 +168,8 @@ def _run_merged(a, engines) -> int:
         return 2
     configs = RunConfig.load_many(engines)
     app = merge(configs)                     # raises on a shared-block mismatch
+    if a.news_check:
+        return news_check(app)
     if a.instruments:
         app.select_instruments(a.instruments)
     start, end = merged_dates(configs)
@@ -202,6 +205,66 @@ def _run_merged(a, engines) -> int:
                     "Each engine is configured in its own config.yaml.")
 
 
+def news_check(app) -> int:
+    """Is the news filter still able to block anything?
+
+    A news calendar is a finite list of dates typed into the config. When the
+    clock passes the last of them the filter stays switched on, keeps
+    announcing its categories, and blocks nothing — there is simply no date
+    left to match. Nothing fails, so nothing tells you. This prints the one
+    fact that answers it: how many dates are still ahead.
+    """
+    import datetime as _dt
+    from orb.timeutils import NewsDays
+
+    today = _dt.date.today()
+    print("=" * 78)
+    print(f"  NEWS FILTER — today is {today:%Y-%m-%d}")
+    print("=" * 78)
+
+    worst = None
+    for session in app.enabled_sessions():
+        rows = []
+        for _key, label, cat in session.news.items():
+            rows.append((label, NewsDays(cat.dates), cat.mode))
+        rows.append(("News Days (general)", NewsDays(session.news_days),
+                     session.news_trading))
+
+        print(f"\n  {session.name or 'MAIN'}"
+              + (f"   [{session.instrument}]" if session.instrument else ""))
+        any_dates = False
+        for label, dates, mode in rows:
+            if not len(dates):
+                continue
+            any_dates = True
+            last = dates.last_date
+            ahead = sum(1 for frm, to in dates.ranges if to >= today)
+            state = ("EXPIRED" if last < today else
+                     f"{(last - today).days}d left")
+            flag = "  <-- blocks nothing from here on" if ahead == 0 else ""
+            print(f"    {label:<28} {mode.upper():<5} {len(dates):>3} entries  "
+                  f"last {last:%Y-%m-%d}  {ahead:>3} ahead  {state}{flag}")
+            if mode in ("off", "only"):
+                worst = last if worst is None else max(worst, last)
+        if not any_dates:
+            print("    no dates configured — every day is tradeable")
+
+    print("\n" + "=" * 78)
+    if worst is None:
+        print("  No OFF or ONLY category has any dates. The news filter cannot "
+              "block\n  anything, whatever the modes say.")
+    elif worst < today:
+        print(f"  THE CALENDAR HAS EXPIRED. The latest blocking date anywhere "
+              f"is\n  {worst:%Y-%m-%d}, {(today - worst).days} day(s) ago. "
+              f"The filter is ON and is letting every\n  news day through. Add "
+              f"the coming months' releases to the `news:` block.")
+        return 1
+    else:
+        print(f"  Latest blocking date: {worst:%Y-%m-%d} "
+              f"({(worst - today).days} day(s) from now).")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -215,6 +278,12 @@ def main() -> int:
                    help="print the settings that would run, then stop")
 
     g = p.add_argument_group("run overrides — omit to use the config file")
+    g.add_argument("--news-check", action="store_true",
+                   help="print every news category, how many dates it holds, "
+                        "when it runs out and how many are still ahead — then "
+                        "stop. A calendar that has expired filters NOTHING "
+                        "while still looking configured, so this is the fast "
+                        "way to see whether the filter can still bite.")
     g.add_argument("--instruments", "-i", default=None, metavar="A,B",
                    help="which instruments to trade this run, comma "
                         "separated, e.g. -i gc,es. Omit to trade every one "
@@ -228,6 +297,17 @@ def main() -> int:
                    default=None, metavar="N",
                    help="cap trades per session for this run; 0 = unlimited. "
                         "A session field, so it does NOT go through --set.")
+    g.add_argument("--pullback", dest="pullback_entry", action="store_true",
+                   default=None,
+                   help="enter on a PULLBACK to the level that broke, instead "
+                        "of on the breakout close: long on a touch of the "
+                        "range high, short on a touch of the range low. A "
+                        "touch is enough and it fires during the forming bar. "
+                        "A session field, so it does NOT go through --set.")
+    g.add_argument("--no-pullback", dest="pullback_entry",
+                   action="store_false",
+                   help="force the ordinary breakout entry for this run, "
+                        "whatever the config says.")
     g.add_argument("--news", default=None, choices=["skip", "include"])
     g.add_argument("--start", default=None)
     g.add_argument("--end", default=None)
@@ -269,7 +349,8 @@ def main() -> int:
 
     run_over = {k: getattr(a, k) for k in
                 ("session", "signal_timeframe", "orb_minutes", "risk_reward",
-                 "lots", "news", "log_level", "max_trades_per_session")}
+                 "lots", "news", "log_level", "max_trades_per_session",
+                 "pullback_entry")}
     if a.start:
         rc.period["start"] = a.start
     if a.end:
@@ -297,6 +378,8 @@ def main() -> int:
     # stack trace — a typo in `--set` is a user error, not a crash.
     try:
         app = rc.app_config(run_over)
+        if a.news_check:
+            return news_check(app)
         if a.instruments:
             app.select_instruments(a.instruments)
     except ValueError as exc:

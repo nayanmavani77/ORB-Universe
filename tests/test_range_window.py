@@ -95,13 +95,25 @@ class Feed:
         return None
 
 
-def live_through_window(engine, session, first_minute, n_bars, tf=None):
-    """Run the live loop from before a range window to well after it."""
+def live_through_window(engine, session, first_minute, n_bars, tf="M5",
+                        window_minutes=30):
+    """Run the live loop from before a range window to well after it.
+
+    The window and the timeframe are PINNED here, not read from the shipped
+    config. These tests assert exact bar counts inside a range window, so
+    inheriting a timeframe the user is expected to tune makes them fail on a
+    config change rather than on a code change — which is the opposite of what
+    a test is for.
+    """
     cfg = RunConfig.load(engine).app_config({})
     for s in cfg.sessions.values():
         s.enabled = in_window(s, session) and (s.instrument or "gc") == "gc"
-        if s.enabled and tf:
+        if s.enabled:
             s.signal_timeframe = tf
+            start = s.range_start
+            h, m = (int(x) for x in start.split(":"))
+            t = (h * 60 + m + window_minutes) % 1440
+            s.range_end = f"{t // 60:02d}:{t % 60:02d}"
     bars = [m1(first_minute + i, 4455 + (i % 5)) for i in range(n_bars)]
     trader = LiveTrader(cfg, broker=SimBroker(cfg.symbol, 100000.0),
                         feed=Feed(bars),

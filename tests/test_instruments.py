@@ -488,6 +488,14 @@ def test_a_sweep_defaults_to_what_the_enabled_sessions_trade():
     rc.sweep.pop("instruments", None)
     live = sorted({(s.instrument or "") for s in rc.app.enabled_sessions()} - {""})
     assert rc.sweep_instruments() == live
+
+    # And prove the rule bites: switch every `es` session OFF and `es` must
+    # drop out of the default. Asserting "es is never there" would only be
+    # testing which sessions the shipped config happens to enable, which is a
+    # setting the user is expected to change.
+    for sess in rc.app.sessions.values():
+        if sess.instrument == "es":
+            sess.enabled = False
     assert "es" not in rc.sweep_instruments(), \
         "an instrument nothing trades was swept anyway"
     # naming it explicitly still sweeps it
