@@ -111,8 +111,9 @@ class Broker(ABC):
 
     @abstractmethod
     def open_market(self, is_buy: bool, lots: float, sl: float,
-                    comment: str,
-                    magic: int = 0) -> Tuple[bool, Optional[Position], str]: ...
+                    comment: str, magic: int = 0,
+                    price: Optional[float] = None
+                    ) -> Tuple[bool, Optional[Position], str]: ...
 
     # -- per-instrument access --------------------------------------------
     # Defaults that make a single-instrument broker answer correctly without
@@ -251,9 +252,9 @@ class InstrumentView:
         return self._broker.positions_count(self.instrument)
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
-                    magic: int = 0):
+                    magic: int = 0, price: Optional[float] = None):
         return self._broker.open_market(is_buy, lots, sl, comment, magic=magic,
-                                        instrument=self.instrument)
+                                        instrument=self.instrument, price=price)
 
     def close_all(self, reason: str) -> None:
         self._broker.close_all(reason, instrument=self.instrument)
@@ -404,11 +405,25 @@ class SimBroker(Broker):
         return 1 if self.positions.get(instrument or "") else 0
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
-                    magic: int = 0, instrument: str = ""):
+                    magic: int = 0, instrument: str = "",
+                    price: Optional[float] = None):
+        """Open at the market, or AT A GIVEN PRICE.
+
+        `price` is how a pullback entry fills at the level it was waiting for.
+        The strategy detects the touch inside the bar — the bar's low reached
+        the range high — and that level, not the bar's open, is where a resting
+        limit order would have filled. Passing it here keeps the simulated fill
+        honest instead of pricing the trade wherever the bar happened to start.
+
+        The touch is already proven by the bar's own high/low before this is
+        called, so the fill is not optimistic: price genuinely traded there.
+        Slippage still applies, in the same direction it always does.
+        """
         key = instrument or ""
         if self.positions.get(key) is not None:
             return False, None, "position already open"
-        price = self.price_for(is_buy, instrument)
+        if price is None:
+            price = self.price_for(is_buy, instrument)
         if price <= 0:
             return False, None, "no price"
         fill = price + (self.slippage if is_buy else -self.slippage)
@@ -818,9 +833,33 @@ class MT5Broker(Broker):
         return mt5.ORDER_FILLING_RETURN
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
-                    magic: int = 0, instrument: str = ""):
+                    magic: int = 0, instrument: str = "",
+                    price: Optional[float] = None):
+        """Send a market order.
+
+        `price` — the level a pullback entry was waiting for — is accepted and
+        deliberately NOT used as the fill price. A live broker fills at ITS
+        quote, not at a level we name; sending anything else would be inventing
+        a price the market never offered.
+
+        This is the same, already-documented relationship the breakout entry
+        has: the simulated broker fills from the bar it is fed, the live broker
+        fills at the quote it can actually get. The STRATEGY is identical in
+        both — it decides on the same touch, at the same instant — and only the
+        fill differs, which is the one difference the two paths are allowed to
+        have.
+
+        What that costs in practice: the EA sees the touch when the base bar
+        carrying it arrives, so a live pullback fill lands at the price then
+        current rather than exactly on the level. Expect live entries to sit a
+        little the wrong side of the backtest's, and size that into any
+        expectation built from a pullback backtest.
+        """
         mt5 = self.mt5
         magic = int(magic) if magic else self.magic
+        if price is not None and self.log:
+            self.log.debug(f"Pullback level {price} requested; filling at the "
+                           f"live quote, as a market order must.")
         price = self.ask(instrument) if is_buy else self.bid(instrument)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,

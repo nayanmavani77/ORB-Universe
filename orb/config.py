@@ -135,6 +135,15 @@ class StrategyConfig:
     risk_reward: float = 2.0              # InpRR
     lots: float = 0.10                    # InpLots
     require_range_reentry: bool = True    # InpRequireRangeReentry
+    # Enter on a PULLBACK to the broken level instead of on the breakout close.
+    #   long  — after price breaks above the range high, enter when it comes
+    #           back and TOUCHES the range high
+    #   short — after price breaks below the range low, enter when it comes
+    #           back and TOUCHES the range low
+    # A touch is enough; the bar need not close there, and the entry fires
+    # DURING the running bar rather than waiting for it to finish.
+    # Off by default, so every existing config trades exactly as it always has.
+    pullback_entry: bool = False          # InpPullbackEntry
     max_trades_per_session: int = 0       # InpMaxTradesPerSession (0 = unlimited)
     close_at_stop_time: bool = True       # InpCloseAtStopTime
 

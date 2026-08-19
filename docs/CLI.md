@@ -100,6 +100,7 @@ at the project root, which is git-ignored. See `.env.example`.
 | `--risk-reward`<br>`--rr` | `2.0` | Take profit as a multiple of the stop distance, measured from the real fill price. |
 | `--lots` | `0.1` | Position size in lots. |
 | `--require-range-reentry`<br>`--reentry` | `true` | After a trade closes, require a close back inside the range before the next breakout is taken. Negate with --no-reentry. |
+| `--pullback-entry`<br>`--pullback` | `false` | Enter on a PULLBACK to the broken level instead of on the breakout close: long when price comes back and touches the range high, short when it touches the range low. A touch is enough — the bar need not close there, and the entry fires during the running bar. Negate with --no-pullback. |
 | `--max-trades-per-session`<br>`--max-trades` | `0` | Cap on trades per session; 0 means unlimited. |
 | `--close-at-stop-time`<br>`--close-at-stop` | `true` | Flatten any open position at the stop time. Negate with --no-close-at-stop. |
 | `--magic` | `20260814` | Magic number identifying this EA's orders. |

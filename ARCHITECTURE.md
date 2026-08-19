@@ -603,6 +603,44 @@ traded so two markets on identical settings cannot overwrite each other.
 
 ---
 
+## Pullback entries
+
+`pullback_entry` (off by default) changes WHEN a breakout trades, not whether.
+The breakout close arms the level it broke; the trade fires when price comes
+back and touches it — the range high for a long, the range low for a short.
+
+The interesting part is *when* that can be detected. Everything else in the EA
+decides on a CLOSED signal-timeframe bar, but a touch is an intrabar event: on
+M15 a wick that reaches the level and reverses would be invisible until fifteen
+minutes later, by which time the price is gone. So `Engine._tick` gained one
+step — `strategy.on_price(base_bar, now)` — driven by the BASE bar, which is the
+finest resolution the feed provides. Both `run_backtest` and `LiveTrader` drive
+`_tick`, so the intrabar path is single-source like everything else. It is bound
+once per engine via `getattr`, so a strategy that does not want intrabar prices
+simply omits the method.
+
+Ordering inside the tick matters and is deliberate: `on_price` runs AFTER
+`on_bar_closed`. The bar that just closed is history and the base bar arriving
+now is the present, so a breakout detected from that closed bar is known before
+the current bar finishes printing — and a touch inside the current bar is a
+real, fillable pullback. Running it first silently ignored every pullback that
+came on the very next bar, which with a sharp rejection is most of them; three
+tests failed on exactly that before the order was corrected.
+
+Fills: the touch is proven by the bar's own high/low, so `SimBroker` fills AT
+the level via `open_market(price=...)` — price genuinely traded there, so this
+is not optimism. `MT5Broker` accepts the same argument and deliberately ignores
+it: a live broker fills at its quote, and naming a price the market never
+offered would be inventing one. That is the same simulated-vs-live fill
+difference the breakout entry already has, but it bites harder here because the
+entry is defined by a price rather than by a bar close.
+
+The stop and target are unchanged in rule and different in size: `_open_trade`
+takes the level as `signal_price`, so `sl_mode` measures from the level rather
+than from wherever the bar opened.
+
+---
+
 ## Outputs
 
 ```
@@ -649,6 +687,7 @@ the cent. All 24 identical across the whole restructure.
 | `python -m pytest tests/test_exit_journal.py` | 10 |
 | `python -m pytest tests/test_bar_timing.py` | 10 |
 | `python -m pytest tests/test_journal.py` | 12 |
+| `python -m pytest tests/test_pullback.py` | 12 |
 | `python -m pytest tests/test_instruments.py` | 58 |
 
 The load-bearing tests are two. `test_mixed_engines_equal_separate_runs`: Asia on

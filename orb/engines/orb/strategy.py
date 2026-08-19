@@ -79,6 +79,13 @@ class OrbStrategy:
         #: OPEN time of the last bar filed into history — see `ingest_bar`
         self.last_ingested_time: Optional[datetime] = None
 
+        #: PULLBACK ENTRY (`pullback_entry`). A breakout does not trade
+        #: immediately; it arms a level and the trade fires when price comes
+        #: back and touches it. True = waiting to BUY at the range high,
+        #: False = waiting to SELL at the range low, None = nothing pending.
+        self._pullback_side: Optional[bool] = None
+        self._pullback_level: float = 0.0
+
         #: LIVE ONLY. `(from, to)` that neither the warm-up download nor the
         #: live subscription covers — the historical API always lags the live
         #: feed by minutes, and those minutes belong to neither. `from` is None
@@ -190,6 +197,10 @@ class OrbStrategy:
         self.range_high = self.range_low = self.range_mid = 0.0
         self.trades_this_session = 0
         self.armed = False
+        # a level armed yesterday means nothing today — the range it belonged
+        # to is gone
+        self._pullback_side = None
+        self._pullback_level = 0.0
         # cleared per session: both only ever apply to a session that was
         # already under way when the EA started (see `_is_late_session`)
         self._await_reentry = False
@@ -564,7 +575,16 @@ class OrbStrategy:
             return tag[:self.COMMENT_LIMIT]
         return f"{base[:room]} {tag}"
 
-    def _open_trade(self, is_buy: bool) -> None:
+    def _open_trade(self, is_buy: bool, at_price: Optional[float] = None) -> None:
+        """Send the order.
+
+        `at_price` is the level a PULLBACK entry was waiting at. It replaces the
+        current price as where the signal fired — which is what makes the stop
+        distance measure from the level rather than from wherever the bar
+        happened to open — and is passed to the broker as the price to fill at.
+        A simulated broker honours it exactly; a live broker fills at its own
+        quote, because no broker fills at a price you name.
+        """
         b = self.broker
         d = b.digits
         min_dist = b.stops_level_price
@@ -576,10 +596,19 @@ class OrbStrategy:
         exec_price = b.price_for(is_buy)              # where the order will fill
         if exec_price <= 0.0:
             return
-        signal_price = b.reference_price(is_buy)      # where the signal fired
+        signal_price = (at_price if at_price is not None
+                        else b.reference_price(is_buy))   # where the signal fired
         if signal_price <= 0.0:
             signal_price = exec_price
         translate = bool(getattr(b, "translate_levels", False))
+        if at_price is not None and not translate:
+            # Same instrument, so the level and the fill live in ONE price
+            # space: a pullback fills at the level it was waiting at. With
+            # `translate_levels` on they are different instruments, and the
+            # feed touching its level says nothing about where the broker's
+            # own symbol is — so the execution price stays the broker's quote
+            # and only the DISTANCE carries across, exactly as for a breakout.
+            exec_price = at_price
 
         stop_level = b.normalize_price(self._stop_price(is_buy))   # feed space
         sl_distance = abs(signal_price - stop_level)
@@ -608,7 +637,7 @@ class OrbStrategy:
         # send with the SL already attached (protection from tick one);
         # the TP is applied below, from the true execution price.
         ok, pos, err = b.open_market(is_buy, lot, sl, self._order_comment(),
-                                     magic=self.cfg.magic)
+                                     magic=self.cfg.magic, price=at_price)
         if not ok:
             # A dry run declining to send is the configuration working, not a
             # failure — logging it at ERROR made a correct `dry_run: true`
@@ -850,7 +879,94 @@ class OrbStrategy:
         if not self._trading_allowed_now(now):
             return
 
+        if self.cfg.pullback_entry:
+            self._arm_pullback(buy_signal, closed_open)
+            return
+
         self._open_trade(buy_signal)
+
+    # ------------------------------------------------------------------
+    #  PULLBACK ENTRY
+    # ------------------------------------------------------------------
+    def _arm_pullback(self, is_buy: bool, closed_open: datetime) -> None:
+        """A breakout happened; wait for price to come back to the level.
+
+        Nothing is ordered here. The level is remembered, and `on_price` fires
+        the trade the moment price touches it.
+        """
+        level = self.range_high if is_buy else self.range_low
+        d = self.broker.digits
+        if self._pullback_side is is_buy and self._pullback_level == level:
+            # a second breakout bar in the same direction re-states a level we
+            # are already waiting at — nothing has changed, so say nothing
+            return
+        self._pullback_side = is_buy
+        self._pullback_level = level
+        self.log.info(
+            f"PULLBACK ARMED  breakout {'above' if is_buy else 'below'} "
+            f"{level:.{d}f} — no entry yet. Waiting for price to come back and "
+            f"TOUCH {level:.{d}f} to "
+            f"{'BUY' if is_buy else 'SELL'}.")
+
+    def _cancel_pullback(self, why: str) -> None:
+        if self._pullback_side is None:
+            return
+        d = self.broker.digits
+        self.log.info(f"PULLBACK OFF    the pending "
+                      f"{'BUY' if self._pullback_side else 'SELL'} at "
+                      f"{self._pullback_level:.{d}f} is cancelled — {why}.")
+        self._pullback_side = None
+        self._pullback_level = 0.0
+
+    def on_price(self, bar: Bar, now: datetime) -> None:
+        """Price moved. Fire a pending pullback entry if it touched the level.
+
+        Called for every BASE bar, so the entry triggers DURING the signal bar
+        that is still forming rather than after it closes. A touch is all that
+        is required — `bar.low <= level` for a long, `bar.high >= level` for a
+        short — because the level is where a resting limit order would have
+        been hit, and it would not have waited for a close.
+
+        The touch is proven by the bar's own high/low, so filling AT the level
+        is not optimism: price genuinely traded there inside this bar.
+        """
+        if self._pullback_side is None:
+            return
+
+        is_buy = self._pullback_side
+        level = self._pullback_level
+
+        # the same guards the breakout path applies, in the same order
+        if self.stop_enabled and now >= self.trade_until:
+            self._cancel_pullback("the session's stop time has passed")
+            return
+        if not self.in_trading_window(now):
+            self._cancel_pullback("the trading window has closed")
+            return
+        if self.broker.positions_count() > 0:
+            return                      # a trade is running; wait for it
+        if not self.range_valid:
+            self._cancel_pullback("this session has no valid range")
+            return
+
+        touched = (bar.low <= level) if is_buy else (bar.high >= level)
+        if not touched:
+            return
+
+        if not self._trading_allowed_now(now):
+            # the cap, the news filter or a block — the level is spent either
+            # way, because the touch has happened and will not happen again
+            self._cancel_pullback("this session may not trade now")
+            return
+
+        d = self.broker.digits
+        self.log.info(
+            f"PULLBACK TOUCH  bar {fmt_dt(bar.time)} reached "
+            f"{(bar.low if is_buy else bar.high):.{d}f}, touching "
+            f"{level:.{d}f} — entering {'BUY' if is_buy else 'SELL'} there.")
+        self._pullback_side = None
+        self._pullback_level = 0.0
+        self._open_trade(is_buy, at_price=level)
 
     # ------------------------------------------------------------------
     def report_exit(self, ticket: int, how: str, price: float,

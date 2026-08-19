@@ -224,6 +224,54 @@ work, not the fade.
 
 ---
 
+## 4b. Pullback entries
+
+Off by default. Switched on, a breakout does **not** trade — it arms the level
+it broke, and the trade fires when price comes back and **touches** it:
+
+* long — after a close above the range high, buy on a touch of the range high
+* short — after a close below the range low, sell on a touch of the range low
+
+A touch is enough; the bar need not close at the level, and the entry fires
+**during** the bar that is still forming rather than after it closes.
+
+```powershell
+python tools\backtest.py --engine orb --pullback
+python tools\backtest.py --engine orb --no-pullback      # the default
+```
+
+Or per session, and per symbol inside a session:
+
+```yaml
+  new_york:
+    pullback_entry: true          # the whole window
+    instruments:
+      gc: {}                      # gold: pullback
+      es: {pullback_entry: false} # ES: straight breakout
+```
+
+The stop and target still come from `sl_mode` and `risk_reward`, but they are
+measured from the **level**, so the distances are usually tighter than from a
+breakout fill. If price never comes back, the session simply takes no trade.
+
+**Measured on gold, New York, Aug 2025 – Aug 2026, shipped settings:**
+
+| | trades | win % | PF | net | max DD | total R |
+|---|---|---|---|---|---|---|
+| breakout (default) | 343 | 38.2 | 1.19 | $49,315 | 22.1% | +28.7 |
+| pullback | 305 | 35.1 | 1.07 | $13,565 | 21.5% | +18.2 |
+
+Fewer trades and a lower factor on these settings — the pullback misses the
+breakouts that never look back, which on gold is where much of the edge is.
+Worth sweeping before adopting; it is not a free improvement.
+
+**Live:** the backtest fills exactly at the level. A real broker fills at its
+quote when the touch is seen, which is usually a little worse — the same
+simulated-vs-live fill difference the breakout entry already has, but it bites
+harder here because the entry is defined by a price rather than a bar close.
+
+---
+
 ## 5. Sweeps
 
 Always size it first:

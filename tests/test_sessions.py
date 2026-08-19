@@ -527,7 +527,9 @@ class _RecordingBroker:
     def modify(self, *a): return True, ""
     def close_all(self, *a): pass
 
-    def open_market(self, is_buy, lots, sl, comment, magic=0):
+    def open_market(self, is_buy, lots, sl, comment, magic=0, price=None):
+        # `price` is the level a pullback entry waited at; a real broker fills
+        # there (simulated) or at its own quote (live). Recorded, not used.
         placed.append(magic)
         return False, None, "recorded"
 
@@ -558,7 +560,7 @@ check("warm-up took no trade", placed.count(101) + placed.count(202) ==
 
 # --- 10. order comments ---------------------------------------------------
 print("\n[10] the order comment names the session and the trade")
-from orb.strategy import RangeBreakoutStrategy                        # noqa: E402
+from orb.strategy import OrbStrategy                        # noqa: E402
 
 
 class _Stub:
@@ -571,7 +573,7 @@ class _Stub:
 def comment_for(name, base, n):
     s = session(name, "19:00", "19:30", "02:55")
     s.comment = base
-    st = RangeBreakoutStrategy(s, _Stub(), logger=RbeaLogger(level=0))
+    st = OrbStrategy(s, _Stub(), logger=RbeaLogger(level=0))
     st.trades_this_session = n
     return st._order_comment()
 
@@ -614,13 +616,13 @@ class _CommentBroker(_Stub):
     def modify(self, *a): return True, ""
     def close_all(self, *a): pass
 
-    def open_market(self, is_buy, lots, sl, comment, magic=0):
+    def open_market(self, is_buy, lots, sl, comment, magic=0, price=None):
         seen.append((comment, magic))
         return False, None, "recorded"
 
 
 sc = session("asia", "19:00", "19:30", "02:55", magic=909)
-st = RangeBreakoutStrategy(sc, _CommentBroker(), logger=RbeaLogger(level=0))
+st = OrbStrategy(sc, _CommentBroker(), logger=RbeaLogger(level=0))
 st.range_valid = st.range_computed = True
 st.range_high, st.range_low, st.range_mid = 110.0, 90.0, 100.0
 st._open_trade(True)
@@ -653,7 +655,7 @@ class _CrossBroker(_Stub):
     def bid(self): return self.price_for(False)
     def close_all(self, *a): pass
 
-    def open_market(self, is_buy, lots, sl, comment, magic=0):
+    def open_market(self, is_buy, lots, sl, comment, magic=0, price=None):
         from orb.broker import Position
         self.sent = sl
         # the broker fills 0.40 away from the quote - slippage
@@ -667,7 +669,7 @@ class _CrossBroker(_Stub):
         return True, ""
 
 
-from orb.strategy import RangeBreakoutStrategy as _RB                # noqa: E402
+from orb.strategy import OrbStrategy as _RB                # noqa: E402
 sx = session("asia", "19:00", "19:30", "02:55", rr=4.0)
 xb = _CrossBroker()
 stx = _RB(sx, xb, logger=RbeaLogger(level=0))

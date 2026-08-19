@@ -78,6 +78,10 @@ class Engine:
         # optional hook called once per tick, after the EA's own housekeeping
         # (live mode uses it to journal server-side exits)
         self.after_tick = None
+        #: `strategy.on_price(bar, now)` if this engine's strategy has one.
+        #: Bound once rather than looked up per bar, and optional so an engine
+        #: whose strategy does not want intrabar prices need not define it.
+        self._on_price = getattr(self.strategy, "on_price", None)
 
     # ------------------------------------------------------------------
     def on_bar(self, bar: Bar, now: datetime) -> Optional[Bar]:
@@ -104,7 +108,7 @@ class Engine:
             closed_tf = None
         if closed_tf is None and self.eager_close:
             closed_tf = self._close_if_bar_completed(bar)
-        self._tick(now, closed_tf)
+        self._tick(now, closed_tf, bar)
         return closed_tf
 
     def _learn_base_seconds(self, bar: Bar) -> None:
@@ -206,7 +210,8 @@ class Engine:
         return closed
 
     # ------------------------------------------------------------------
-    def _tick(self, now: datetime, closed_tf: Optional[Bar]) -> None:
+    def _tick(self, now: datetime, closed_tf: Optional[Bar],
+              base: Optional[Bar] = None) -> None:
         """The EA's OnTick(), in order. This is the single source of truth."""
         # a bar is already in the MT5 history buffer on the tick that opens the
         # next one — which is the very tick ComputeRange() runs on
@@ -222,6 +227,24 @@ class Engine:
         # steps 4-7: arming, breakout detection, order placement
         if closed_tf is not None:
             self.strategy.on_bar_closed(closed_tf, now)
+
+        # step 8: price reached a level we were waiting at.
+        #
+        # Runs on the BASE bar, not the signal-timeframe bar, and that is the
+        # whole point: a pullback entry triggers the moment price TOUCHES the
+        # level, during the bar still forming. Waiting for the signal bar to
+        # close would miss a touch that reverses inside it, and would enter
+        # minutes late when it did not.
+        #
+        # It runs AFTER `on_bar_closed`, and the order matters. The bar that
+        # just closed is history; the base bar arriving now is the present. A
+        # breakout detected from that closed bar is known to the EA before the
+        # current bar has finished printing, so a touch INSIDE the current bar
+        # is a real, fillable pullback. Checking first would silently ignore
+        # every pullback that came on the very next bar — which, with a sharp
+        # rejection, is most of them.
+        if base is not None and self._on_price is not None:
+            self._on_price(base, now)
 
     # ------------------------------------------------------------------
     def flush(self) -> Optional[Bar]:

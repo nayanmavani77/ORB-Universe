@@ -882,7 +882,7 @@ python -m pytest tests/test_multi_engine.py tests/test_orb_reverse.py \
                 tests/test_live_feed.py tests/test_late_start.py \
                 tests/test_range_window.py tests/test_exit_journal.py \
                 tests/test_bar_timing.py tests/test_journal.py \
-                tests/test_instruments.py -q
+                tests/test_instruments.py tests/test_pullback.py -q
 ```
 
 `golden_master.py check` is the one to run after ANY change to the engines: it

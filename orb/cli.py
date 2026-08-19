@@ -94,6 +94,12 @@ SPEC: List[Opt] = [
     Opt(("--require-range-reentry", "--reentry"), "strategy.require_range_reentry",
         "bool", "After a trade closes, require a close back inside the range "
         "before the next breakout is taken. Negate with --no-reentry.", G_STRAT),
+    Opt(("--pullback-entry", "--pullback"), "strategy.pullback_entry", "bool",
+        "Enter on a PULLBACK to the broken level instead of on the breakout "
+        "close: long when price comes back and touches the range high, short "
+        "when it touches the range low. A touch is enough — the bar need not "
+        "close there, and the entry fires during the running bar. Negate with "
+        "--no-pullback.", G_STRAT),
     Opt(("--max-trades-per-session", "--max-trades"),
         "strategy.max_trades_per_session", "int",
         "Cap on trades per session; 0 means unlimited.", G_STRAT, metavar="N"),
