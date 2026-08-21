@@ -191,7 +191,10 @@ def run_backtest(cfg: AppConfig, bars: Sequence[Bar],
         last = {}
         for bar in bars:
             last[getattr(bar, "instrument", "") or ""] = bar
-        for key in list(broker.positions):
+        # A slot is keyed by (instrument, session) now, and several sessions
+        # can hold the same instrument -- so flatten per INSTRUMENT, once, and
+        # let `close_all` settle every session's position on it.
+        for key in dict.fromkeys(k[0] for k in broker.positions):
             tail = last.get(key) or bars[-1]
             broker.set_market(tail.close, tail.time, key)
             broker.close_all("end of backtest", instrument=key)

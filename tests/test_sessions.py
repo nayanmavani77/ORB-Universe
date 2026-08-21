@@ -173,7 +173,7 @@ cfg.sessions = {"asia": session(*A, enabled=False)}
 raises("all disabled rejected", cfg.validate_sessions, "every session is disabled")
 
 # --- 4. overlap validation ------------------------------------------------
-print("\n[4] enabled sessions may not overlap")
+print("\n[4] enabled sessions MAY overlap; each gets its own position slot")
 def cfg_with(*sessions):
     c = base_config()
     c.sessions = {s.name: s for s in sessions}
@@ -185,18 +185,30 @@ ok = cfg_with(session("asia", "19:00", "19:30", "02:55"),
 ok.validate_sessions()
 check("three clean sessions accepted", len(ok.enabled_sessions()), 3)
 
-raises("asia running into london",
-       cfg_with(session("asia", "19:00", "19:30", "03:30"),
-                session("london", "03:00", "03:30", "09:25")).validate_sessions,
-       "overlap")
-raises("ny wrapping into asia",
-       cfg_with(session("asia", "19:00", "19:30", "02:55"),
-                session("ny", "09:30", "10:00", "19:30")).validate_sessions,
-       "overlap")
-raises("identical windows",
-       cfg_with(session("a", "09:30", "10:00", "16:55"),
-                session("b", "09:30", "10:00", "16:55")).validate_sessions,
-       "overlap")
+# Overlap used to be rejected: the broker held ONE position per instrument, so
+# two sessions sharing a clock fought over that slot and the second was
+# silently refused. The slot is per SESSION now — (instrument, magic) — so each
+# manages its own trade and overlap is legal. The magic rule below is what
+# makes it safe, and is checked immediately after.
+for label, a, b in (
+        ("asia running into london",
+         session("asia", "19:00", "19:30", "03:30"),
+         session("london", "03:00", "03:30", "09:25")),
+        ("ny wrapping into asia",
+         session("asia", "19:00", "19:30", "02:55"),
+         session("ny", "09:30", "10:00", "19:30")),
+        ("identical windows",
+         session("a", "09:30", "10:00", "16:55"),
+         session("b", "09:30", "10:00", "16:55"))):
+    c = cfg_with(a, b)
+    c.validate_sessions()
+    check(f"{label} accepted", len(c.enabled_sessions()), 2)
+    check(f"{label} keeps two slots", len({s.magic for s in c.enabled_sessions()}), 2)
+
+dup = cfg_with(session("a", "09:30", "10:00", "16:55"),
+               session("b", "09:30", "10:00", "16:55"))
+list(dup.sessions.values())[1].magic = list(dup.sessions.values())[0].magic
+raises("overlapping sessions sharing a magic", dup.validate_sessions, "magic")
 raises("no stop time alongside another session",
        cfg_with(session("asia", "19:00", "19:30", "0"),
                 session("ny", "09:30", "10:00", "16:55")).validate_sessions,
@@ -213,11 +225,11 @@ solo = cfg_with(session("asia", "19:00", "19:30", "0"))
 solo.validate_sessions()
 check("24h window allowed when alone", len(solo.enabled_sessions()), 1)
 
-print("\n[4c] overlap is ignored for disabled sessions")
+print("\n[4c] a disabled session is not counted at all")
 c = cfg_with(session("asia", "19:00", "19:30", "03:30"),
              session("london", "03:00", "03:30", "09:25", enabled=False))
 c.validate_sessions()
-check("disabled session cannot collide", len(c.enabled_sessions()), 1)
+check("disabled session is not enabled", len(c.enabled_sessions()), 1)
 
 # --- 5. per-session settings ----------------------------------------------
 print("\n[5] each session keeps its own settings")

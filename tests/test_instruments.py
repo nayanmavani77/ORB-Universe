@@ -279,14 +279,33 @@ def test_two_instruments_may_share_a_clock_window():
     cfg.validate_sessions()             # must not raise
 
 
-def test_two_sessions_on_the_same_instrument_may_not_overlap():
-    """The original rule survives: one position slot per instrument, so two
-    overlapping windows on it would silently fight."""
+def test_two_sessions_on_the_same_instrument_may_now_overlap():
+    """This used to be rejected, because the broker held one position per
+    INSTRUMENT and two overlapping windows fought over that single slot.
+
+    The slot is per SESSION now -- keyed by (instrument, magic) -- so each one
+    opens and manages its own trade. That is what lets ORB and reverse-ORB
+    both hold gold through the same London hours.
+    """
     a = session("gc_a", "gc")
     b = session("gc_b", "gc")
     cfg = portfolio((copy.deepcopy(GC), a))
     cfg.sessions[b.name] = b
-    with pytest.raises(ValueError, match="overlap"):
+    cfg.validate_sessions()             # must not raise
+    # and they must be distinguishable, or the slots would collide
+    assert a.magic != b.magic
+
+
+def test_overlapping_sessions_still_need_their_own_magic():
+    """The guard that makes overlap safe. Two sessions sharing a magic would
+    share a slot, and the second would be refused exactly as before -- so the
+    magic rule is now load-bearing rather than merely tidy."""
+    a = session("gc_a", "gc")
+    b = session("gc_b", "gc")
+    b.magic = a.magic
+    cfg = portfolio((copy.deepcopy(GC), a))
+    cfg.sessions[b.name] = b
+    with pytest.raises(ValueError, match="magic"):
         cfg.validate_sessions()
 
 
@@ -899,13 +918,18 @@ def test_cells_on_different_instruments_may_share_a_window():
                               instruments={"gc": {}, "es": {}, "nq": {}})})
 
 
-def test_the_same_instrument_may_not_overlap_across_windows():
-    with pytest.raises(ValueError, match="overlap"):
-        _matrix({"new_york": dict(WINDOW, enabled=True,
-                                  instruments={"gc": {}}),
-                 "late_ny": {"range_start": "09:45", "range_end": "10:15",
-                             "stop_time": "16:55", "enabled": True,
-                             "instruments": {"gc": {}}}})
+def test_the_same_instrument_may_now_overlap_across_windows():
+    """Two windows on gold that share hours are legal: each cell is its own
+    session with its own magic, so each holds its own position."""
+    cfg = _matrix({"new_york": dict(WINDOW, enabled=True,
+                                    instruments={"gc": {}}),
+                   "late_ny": {"range_start": "09:45", "range_end": "10:15",
+                               "stop_time": "16:55", "enabled": True,
+                               "instruments": {"gc": {}}}})
+    live = list(cfg.enabled_sessions())
+    assert len(live) == 2
+    assert {s.instrument for s in live} == {"gc"}
+    assert len({s.magic for s in live}) == 2
 
 
 def test_a_cell_naming_an_undeclared_instrument_is_rejected():

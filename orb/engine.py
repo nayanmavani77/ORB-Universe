@@ -38,12 +38,14 @@ class Engine:
                  store: Optional[BarStore] = None,
                  strategy_cls: Optional[type] = None):
         self.cfg = cfg
-        #: the broker as THIS session sees it — bound to its instrument, so
-        #: every `broker.ask()` / `positions_count()` / `open_market()` the
-        #: strategy makes is scoped without the strategy knowing instruments
-        #: exist. A single-instrument run gets the account broker unchanged.
+        # Bound to this SESSION -- its instrument AND its magic. The magic is
+        # what makes `positions_count()` mean "do I have a trade open?" rather
+        # than "does anyone?", which is what lets two sessions hold the same
+        # instrument at once. A session with neither gets the account broker
+        # unchanged, exactly as before.
         view = getattr(broker, "view", None)
-        self.broker = (view(cfg.instrument) if callable(view) and cfg.instrument
+        self.broker = (view(cfg.instrument, cfg.magic)
+                       if callable(view) and (cfg.instrument or cfg.magic)
                        else broker)
         # Every line this session writes is tagged with its name. Bound once,
         # here, rather than at 78 call sites — so a line added later cannot

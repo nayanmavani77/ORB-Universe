@@ -725,27 +725,28 @@ class AppConfig:
                     f"set a different magic on each session.")
             seen[s.magic] = s.name
 
-        # Overlap is only a problem WITHIN one instrument. The rule exists
-        # because the broker holds one position per instrument, so two sessions
-        # sharing a clock would fight over the same slot — the second would
-        # simply be refused. Across instruments there is no conflict at all:
-        # GC New York and ES New York are the same hours by definition, and
-        # refusing that would make multi-instrument trading impossible.
-        for i, a in enumerate(active):
-            for b in active[i + 1:]:
-                if (a.instrument or "") != (b.instrument or ""):
-                    continue
-                if a.overlaps(b):
-                    where = (f" on instrument '{a.instrument}'"
-                             if a.instrument else "")
-                    raise ValueError(
-                        f"Sessions '{a.name}' ({a.range_start}-{a.stop_time}) and "
-                        f"'{b.name}' ({b.range_start}-{b.stop_time}) overlap"
-                        f"{where}. Two sessions on the SAME instrument must not "
-                        f"share any part of the clock — one has to be flat "
-                        f"before the next opens. Adjust a stop_time or a "
-                        f"range_start, disable one, or put them on different "
-                        f"instruments.")
+        # OVERLAPPING SESSIONS ARE ALLOWED, and this is where they used to be
+        # refused.
+        #
+        # The old rule existed for one reason: the broker held a single
+        # position per INSTRUMENT, so two sessions sharing a clock fought over
+        # one slot and the second was silently refused. Which one won depended
+        # on bar arrival order rather than on either strategy, so the result
+        # measured nothing -- better to reject the config outright.
+        #
+        # The slot is now per SESSION, keyed by (instrument, magic). Each
+        # session opens, manages and closes only its own trade, so ORB and
+        # reverse-ORB can both hold gold through the same London hours, and two
+        # ORB sessions with different settings can run side by side. The magic
+        # check above is what makes that key safe: it is enforced, so no two
+        # sessions can ever collide on one slot.
+        #
+        # Two things follow, and both are the trader's call rather than the
+        # config's. Risk STACKS -- three sessions on gold at 0.10 lots is 0.30
+        # lots of gold -- and the backtest's drawdown reflects the combination,
+        # so it is visible in the result rather than hidden. And LIVE this
+        # needs a HEDGING account: a netting account cannot hold two positions
+        # on one symbol, and would net them into one.
 
     # ---------------------------------------------------------------
     @staticmethod

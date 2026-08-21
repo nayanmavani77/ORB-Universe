@@ -219,18 +219,18 @@ sessions:
         magic: 20260805
 
   london:
-    enabled: true
+    enabled: false
     range_start: "03:00"          # London open
     range_end:   "03:30"
     stop_time:   "09:25"          # flat before New York opens
     instruments:
       gc:
-        enabled: true
+        enabled: false
         lots: 1.0
         magic: 20260802
-        risk_reward: 2.0
-        signal_timeframe: "M15"
-        max_trades_per_session: 3
+        risk_reward: 1.0
+        signal_timeframe: "M1"
+        max_trades_per_session: 0
       es:
         enabled: false
         lots: 39.48
@@ -244,7 +244,7 @@ sessions:
     # Switch this on and run `--engine orb,orb_reverse` to trade Asia with the
     # breakout while London fades, on one account. Each session keeps the
     # engine of the file it is written in, so nothing is restated.
-    enabled: false
+    enabled: true
     range_start: "19:00"          # Asia open
     range_end:   "19:30"
     stop_time:   "02:55"          # flat before London opens
@@ -254,7 +254,7 @@ sessions:
     #   direction: reverse
     instruments:
       gc:
-        enabled: false
+        enabled: true
         lots: 1.0
         magic: 20260801
         risk_reward: 2.0
@@ -266,10 +266,10 @@ sessions:
         lots: 39.48
         magic: 20260822
       nq:
-        enabled: false
+        enabled: true
         lots: 10
         magic: 20260823
-        risk_reward: 4.0
+        risk_reward: 2.0
         sl_mode: full_range
         signal_timeframe: "M15"
         max_trades_per_session: 0
