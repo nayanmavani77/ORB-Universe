@@ -202,11 +202,11 @@ sessions:
                                   # break (and the whole weekend on a Friday).
     instruments:
       gc:
-        enabled: true
+        enabled: false
         lots: 1.0                 # ~$1,510 risk on a typical stop
         magic: 20260803  
       es:
-        enabled: false            # ON once data/es_1m.parquet exists
+        enabled: true            # ON once data/es_1m.parquet exists
         lots: 39               # ~$1,510 risk, to match gold
         magic: 20260804
         risk_reward: 2.0
@@ -219,7 +219,7 @@ sessions:
         magic: 20260805
 
   london:
-    enabled: false
+    enabled: true
     range_start: "03:00"          # London open
     range_end:   "03:30"
     stop_time:   "09:25"          # flat before New York opens
@@ -228,6 +228,9 @@ sessions:
         enabled: true
         lots: 1.0
         magic: 20260802
+        risk_reward: 2.0
+        signal_timeframe: "M15"
+        max_trades_per_session: 3
       es:
         enabled: false
         lots: 39.48
@@ -241,7 +244,7 @@ sessions:
     # Switch this on and run `--engine orb,orb_reverse` to trade Asia with the
     # breakout while London fades, on one account. Each session keeps the
     # engine of the file it is written in, so nothing is restated.
-    enabled: true
+    enabled: false
     range_start: "19:00"          # Asia open
     range_end:   "19:30"
     stop_time:   "02:55"          # flat before London opens
@@ -251,7 +254,7 @@ sessions:
     #   direction: reverse
     instruments:
       gc:
-        enabled: true
+        enabled: false
         lots: 1.0
         magic: 20260801
         risk_reward: 2.0
@@ -264,8 +267,12 @@ sessions:
         magic: 20260822
       nq:
         enabled: false
-        lots: 10.91
+        lots: 10
         magic: 20260823
+        risk_reward: 4.0
+        sl_mode: full_range
+        signal_timeframe: "M15"
+        max_trades_per_session: 0
 
 
 # ===========================================================================
@@ -333,6 +340,45 @@ defaults:
                                   # the level; a real one fills at its quote
                                   # when the touch is seen, which will usually
                                   # be a little worse. Size that in.
+  breakeven: false                # InpBreakEven
+                                  # false — the stop stays where it was placed
+                                  #         for the life of the trade (the
+                                  #         original behaviour)
+                                  # true  — once the trade is far enough in
+                                  #         front, move the stop to the ENTRY
+                                  #         price. From there only a gap or
+                                  #         slippage through the entry loses.
+                                  #
+                                  # "Far enough" is breakeven_trigger_r below,
+                                  # measured in R — multiples of the risk THIS
+                                  # trade was opened with. It fires at most once
+                                  # per trade; the stop is never dragged again
+                                  # behind price (that would be a trailing stop,
+                                  # a different thing).
+                                  #
+                                  # The stop moves DURING the bar that reaches
+                                  # the trigger, and that bar is then walked for
+                                  # stops — so a bar that runs to the trigger
+                                  # and comes back through the entry closes the
+                                  # trade flat. A bar's four numbers cannot say
+                                  # whether its high or its low came first, so
+                                  # the worse order is assumed.
+                                  #
+                                  # Per session, and per instrument cell:
+                                  #   london:
+                                  #     breakeven: true
+                                  #     instruments:
+                                  #       gc: {}
+                                  #       es: {breakeven: false}
+                                  #
+                                  # For one run only: --breakeven / --no-breakeven
+  breakeven_trigger_r: 1.0        # InpBreakEvenTriggerR
+                                  # How far in front the trade must be before
+                                  # the stop moves to the entry, as a multiple
+                                  # of its own risk. 1.0 is the 1:1 case: the
+                                  # trade is up by exactly what it was risking.
+                                  # Ignored unless breakeven is true.
+                                  # For one run only: --breakeven-trigger
   max_trades_per_session: 0       # InpMaxTradesPerSession (0 = unlimited)
   close_at_stop_time: true        # InpCloseAtStopTime — flatten at stop_time.
                                   # Required when more than one session is on.
@@ -347,7 +393,23 @@ defaults:
   # in a merged run. Every session below sets its own; this is the fallback a
   # session inherits when it does not.
   magic: 20260800                 # InpMagic — tags this EA's orders in MT5
-  comment: "RangeBreak"           # InpComment — order comment
+  comment: ""                     # InpComment — extra text after the tag
+                                  #
+                                  # Every order already carries a standard tag:
+                                  #
+                                  #     O | A | #2
+                                  #     ^   ^    ^
+                                  #     |   |    +-- trade number in the session
+                                  #     |   +------- session: A sia, L ondon,
+                                  #     |            N ew York (its first letter)
+                                  #     +----------- strategy: O = breakout,
+                                  #                  R = reverse
+                                  #
+                                  # Anything written here is appended AFTER the
+                                  # tag, and trimmed first if MT5's 31-character
+                                  # limit is reached — the tag is never cut, so
+                                  # it stays readable and splits on `|`.
+                                  # Leave it empty for the tag alone.
 
 # ===========================================================================
 # 4  NEWS DAYS
@@ -483,7 +545,7 @@ news:
       2026-08-05
 
 # An extra un-categorised bucket. Behaves exactly like a ninth category:
-# put any dates here and set news_trading to on / off / offly.
+# put any dates here and set news_trading to on / off / only.
 news_days: ""
 news_trading: "off"
 
@@ -636,6 +698,14 @@ sweep:
   news:            [include, skip]
   risk_reward:     [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]
   sl_modes:        [mid_range]
+  # How many trades a session may take: 1 = R, 2 = RR, 3 = RRR, 0 = unlimited.
+  # Turnover is what decides whether an instrument clears its own dealing
+  # costs, so this axis is usually worth more than another R:R step.
+  trade_caps:      [1, 2, 3, 0]
+  # Break-even trigger, as a multiple of the trade's own risk. `off` disables
+  # it. Keep `off` in the list: the question is whether moving the stop to the
+  # entry helps at all, and only the same grid run both ways answers it.
+  breakevens:      [off, 1.0, 1.5]
 
   out_dir: null                   # null -> backtest/orb/sweep/
   save_trades: false

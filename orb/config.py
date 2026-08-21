@@ -144,6 +144,16 @@ class StrategyConfig:
     # DURING the running bar rather than waiting for it to finish.
     # Off by default, so every existing config trades exactly as it always has.
     pullback_entry: bool = False          # InpPullbackEntry
+    # === Break even ===
+    # Once a trade is `breakeven_trigger_r` x its own risk in front, move the
+    # stop loss to the entry price. From that point the trade cannot lose.
+    # The trigger is measured in R, so 1.0 is the 1:1 case: "up by what it was
+    # risking". It fires at most once per trade, and it fires DURING the bar
+    # that reaches the level, not at that bar's close — so a bar that runs to
+    # the trigger and comes back through the entry closes the trade flat.
+    # Off by default, so every existing config trades exactly as it always has.
+    breakeven: bool = False               # InpBreakEven
+    breakeven_trigger_r: float = 1.0      # InpBreakEvenTriggerR
     max_trades_per_session: int = 0       # InpMaxTradesPerSession (0 = unlimited)
     close_at_stop_time: bool = True       # InpCloseAtStopTime
 

@@ -578,22 +578,28 @@ def comment_for(name, base, n):
     return st._order_comment()
 
 
-check("session and trade number present",
-      comment_for("asia", "RangeBreak", 1), "RangeBreak asia #2")
+# `<strategy> | <session letter> | #<trade in session>`
+check("strategy, session letter and trade number",
+      comment_for("asia", "", 1), "O | A | #2")
 check("counts THIS trade, not the last one",
-      comment_for("asia", "RangeBreak", 0), "RangeBreak asia #1")
-check("a different session reads differently",
-      comment_for("new_york", "RangeBreak", 0), "RangeBreak new_york #1")
-check("no base comment still identifies the session",
-      comment_for("asia", "", 0), "asia #1")
+      comment_for("asia", "", 0), "O | A | #1")
+check("London reads L", comment_for("london", "", 0), "O | L | #1")
+check("New York reads N", comment_for("new_york", "", 0), "O | N | #1")
+check("a matrix cell keeps its window letter",
+      comment_for("asia_gc", "", 0), "O | A | #1")
+
+check("a custom comment follows the tag",
+      comment_for("asia", "RangeBreak", 1), "O | A | #2 RangeBreak")
 
 long_base = "A very long custom comment that will not fit at all"
 c = comment_for("asia", long_base, 1)
 check("over-long comment is capped at 31", len(c) <= 31, True)
-check("the session tag survives truncation", c.endswith("asia #2"), True)
+check("the tag survives truncation, never the custom text",
+      c.startswith("O | A | #2"), True)
 
 huge = comment_for("a_very_long_session_name_beyond_limit", "RangeBreak", 0)
 check("a huge session name still fits", len(huge) <= 31, True)
+check("and still starts with the tag", huge.startswith("O | A | #1"), True)
 
 print("\n[10b] the comment reaches the broker")
 seen = []
@@ -626,7 +632,7 @@ st = OrbStrategy(sc, _CommentBroker(), logger=RbeaLogger(level=0))
 st.range_valid = st.range_computed = True
 st.range_high, st.range_low, st.range_mid = 110.0, 90.0, 100.0
 st._open_trade(True)
-check("broker received the built comment", seen[0][0], "RangeBreak asia #1")
+check("broker received the built comment", seen[0][0], "O | A | #1 RangeBreak")
 check("broker received the session magic", seen[0][1], 909)
 
 # --- 11. cross-instrument levels (CME GC signal -> XAUUSD execution) -------

@@ -94,6 +94,15 @@ SPEC: List[Opt] = [
     Opt(("--require-range-reentry", "--reentry"), "strategy.require_range_reentry",
         "bool", "After a trade closes, require a close back inside the range "
         "before the next breakout is taken. Negate with --no-reentry.", G_STRAT),
+    Opt(("--breakeven", "--break-even"), "strategy.breakeven", "bool",
+        "Move the stop loss to the entry price once the trade is far enough "
+        "in front — see --breakeven-trigger for how far. From there only a gap "
+        "or slippage through the entry loses. Negate with --no-breakeven.",
+        G_STRAT),
+    Opt(("--breakeven-trigger",), "strategy.breakeven_trigger_r", "float",
+        "How far in front the trade must be before the stop moves to entry, "
+        "as a multiple of its own risk. 1.0 = 1:1, the trade is up by what it "
+        "was risking. Only used when --breakeven is on.", G_STRAT, metavar="R"),
     Opt(("--pullback-entry", "--pullback"), "strategy.pullback_entry", "bool",
         "Enter on a PULLBACK to the broken level instead of on the breakout "
         "close: long when price comes back and touches the range high, short "

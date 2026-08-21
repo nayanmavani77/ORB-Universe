@@ -86,6 +86,17 @@ class OrbStrategy:
         self._pullback_side: Optional[bool] = None
         self._pullback_level: float = 0.0
 
+        #: BREAK EVEN (`breakeven` / `breakeven_trigger_r`). The position this
+        #: session opened, held so its stop can be moved once the trade is far
+        #: enough in front. Held rather than re-read from the broker because
+        #: the numbers break-even needs -- the risk taken at entry and, when
+        #: signal and execution are different instruments, where the signal
+        #: fired -- exist only on this object. A live restart loses it, and
+        #: break-even simply does not manage a trade opened before the restart;
+        #: that trade keeps the stop and target it was given, which is the safe
+        #: way to degrade.
+        self._be_pos = None
+
         #: LIVE ONLY. `(from, to)` that neither the warm-up download nor the
         #: live subscription covers — the historical API always lags the live
         #: feed by minutes, and those minutes belong to neither. `from` is None
@@ -201,6 +212,9 @@ class OrbStrategy:
         # to is gone
         self._pullback_side = None
         self._pullback_level = 0.0
+        # likewise the trade being managed: a new session does not inherit the
+        # previous one's position
+        self._be_pos = None
         # cleared per session: both only ever apply to a session that was
         # already under way when the EA started (see `_is_late_session`)
         self._await_reentry = False
@@ -218,6 +232,7 @@ class OrbStrategy:
             self.log.info(("Session date: " + why) if allowed else
                           ("Session date: " + why + " - the range is still built "
                            "but no trades will be taken."))
+
 
     def _sync_session(self, now: datetime) -> None:
         today_start = date_only(now) + timedelta(seconds=self.start_sec)
@@ -557,23 +572,43 @@ class OrbStrategy:
     # trimming it.
     COMMENT_LIMIT = 31
 
-    def _order_comment(self) -> str:
-        """`RangeBreak asia #2` — base text, session name, trade number.
+    #: Which strategy this is, in one letter, for the order comment.
+    #: `O` = the ordinary opening-range breakout. `orb_reverse` overrides it.
+    STRATEGY_LETTER = "O"
 
-        With several sessions running, every position would otherwise read the
-        same word in the terminal. The session tag is the part that identifies
-        the trade, so it is kept whole and the base text is trimmed if
-        something has to give.
+    def _session_letter(self) -> str:
+        """The session's first letter: Asia -> A, London -> L, New York -> N.
+
+        Taken from the session NAME, so a matrix cell called `asia_gc` still
+        reads `A` — the instrument is already visible in the terminal as the
+        symbol, and repeating it here would spend characters saying nothing.
+        """
+        name = str(self.cfg.name or "").strip()
+        return name[0].upper() if name else "?"
+
+    def _order_comment(self) -> str:
+        """`O | A | #2` — strategy, session, trade number within the session.
+
+        Three fields, fixed order, one separator. Short enough to survive MT5's
+        comment limit whole, and regular enough to split on `|` when reading
+        the terminal's history back.
+
+        The trade number counts THIS trade, not the last one, so the first
+        trade of a session reads `#1`.
+
+        `comment:` from the config is appended only if it is set and there is
+        room. The three standard fields always come first and are never
+        trimmed, so the tag stays parseable however long the custom text is.
         """
         n = self.trades_this_session + 1          # this trade, not the last one
-        tag = f"{self.cfg.name or 'MAIN'} #{n}"
+        tag = f"{self.STRATEGY_LETTER} | {self._session_letter()} | #{n}"
         base = str(self.cfg.comment or "").strip()
         if not base:
             return tag[:self.COMMENT_LIMIT]
         room = self.COMMENT_LIMIT - len(tag) - 1
-        if room <= 0:                              # a long session name wins
+        if room <= 0:
             return tag[:self.COMMENT_LIMIT]
-        return f"{base[:room]} {tag}"
+        return f"{tag} {base[:room]}"
 
     def _open_trade(self, is_buy: bool, at_price: Optional[float] = None) -> None:
         """Send the order.
@@ -681,6 +716,13 @@ class OrbStrategy:
             real_risk = abs(entry - real_sl)
         real_tp = b.normalize_price(entry + self.cfg.risk_reward * real_risk) if is_buy \
             else b.normalize_price(entry - self.cfg.risk_reward * real_risk)
+        # What the trade was opened with, recorded once. `initial_risk` is what
+        # every R-multiple is measured against, because the stop may move;
+        # `signal_entry` is the same entry expressed in FEED space, which is
+        # the only space a feed bar's high and low can be compared against.
+        pos.initial_risk = real_risk
+        pos.signal_entry = signal_price if translate else entry
+        self._be_pos = pos if self.cfg.breakeven else None
         if translate:
             basis = getattr(b, "basis", None)
             self.log.info(
@@ -918,8 +960,88 @@ class OrbStrategy:
         self._pullback_side = None
         self._pullback_level = 0.0
 
+    def _maybe_breakeven(self, bar: Bar) -> None:
+        """Move the stop to the entry once the trade is far enough in front.
+
+        OFF unless `breakeven` is set, and it fires at most once per trade.
+        The trigger is `breakeven_trigger_r` x the risk the trade was OPENED
+        with -- so "1.0" means "as soon as the trade is up by what it was
+        risking", the 1:1 case.
+
+        Measured on the BASE bar's own high and low, so the move happens
+        inside the bar that reached the level rather than at the next close.
+        That bar is then walked for stops by the broker, which is deliberate:
+        a bar that runs to the trigger and comes back through the entry closes
+        the trade flat. Four numbers per bar cannot say whether the high or the
+        low came first, and assuming the favourable order would be a backtest
+        flattering itself. This is the same choice the simulator already makes
+        when one bar touches both the stop and the target.
+
+        The comparison uses `signal_entry`, not `entry_price`: under
+        `translate_levels` the bar is quoted on the feed's instrument and the
+        fill on the broker's, tens of dollars apart. The distance carries
+        across, the level does not -- exactly as for the stop and target.
+        """
+        pos = self._be_pos
+        if pos is None:
+            return
+        if self.broker.positions_count() == 0:      # it closed; nothing to move
+            self._be_pos = None
+            return
+        if pos.breakeven_at or pos.initial_risk <= 0.0:
+            return
+
+        b = self.broker
+        d = b.digits
+        ref = pos.signal_entry or pos.entry_price
+        move = self.cfg.breakeven_trigger_r * pos.initial_risk
+        target = ref + move if pos.is_buy else ref - move
+        reached = (bar.high if pos.is_buy else bar.low)
+        if (reached < target) if pos.is_buy else (reached > target):
+            return
+
+        new_sl = b.normalize_price(pos.entry_price)
+        if new_sl == b.normalize_price(pos.sl):
+            pos.breakeven_at = new_sl               # already there; done asking
+            return
+
+        # LIVE ONLY in practice: a broker refuses a stop sitting closer to the
+        # market than its minimum distance. Price can retreat between the bar
+        # that reached the trigger and the moment the order is sent, so this
+        # can genuinely fail -- and when it does the right answer is to leave
+        # the trade alone and try again on the next bar, NOT to mark break-even
+        # as done. `stops_level_points` is 0 in a backtest, so this is inert
+        # there.
+        min_dist = b.stops_level_price
+        if min_dist > 0.0:
+            exit_price = b.price_for(not pos.is_buy)
+            room = (exit_price - new_sl) if pos.is_buy else (new_sl - exit_price)
+            if room < min_dist:
+                self.log.warn_once(
+                    f"be-close-{pos.ticket}",
+                    f"  BREAK EVEN HELD #{pos.ticket} entry {new_sl:.{d}f} is "
+                    f"{room:.{d}f} from the market, inside the broker minimum "
+                    f"{min_dist:.{d}f}. Stop left where it is; will retry.")
+                return
+
+        was = pos.sl          # captured BEFORE the move; `modify` rewrites it
+        ok, err = b.modify(pos, new_sl, pos.tp)
+        if not ok:
+            self.log.error(
+                f"  BREAK EVEN FAILED #{pos.ticket} could not move the stop to "
+                f"{new_sl:.{d}f}: {err}. The trade is still running on its "
+                f"ORIGINAL stop.")
+            return
+        pos.breakeven_at = new_sl
+        pos.breakeven_bar = bar.time
+        self.log.info(
+            f"  BREAK EVEN      #{pos.ticket} reached {reached:.{d}f} "
+            f"({self.cfg.breakeven_trigger_r:g}R = {move:.{d}f} from "
+            f"{ref:.{d}f}) — stop moved {was:.{d}f} -> {new_sl:.{d}f} "
+            f"(entry). Only a gap or slippage through it loses from here.")
+
     def on_price(self, bar: Bar, now: datetime) -> None:
-        """Price moved. Fire a pending pullback entry if it touched the level.
+        """Price moved. Manage the open trade, then fire a pending pullback.
 
         Called for every BASE bar, so the entry triggers DURING the signal bar
         that is still forming rather than after it closes. A touch is all that
@@ -930,6 +1052,12 @@ class OrbStrategy:
         The touch is proven by the bar's own high/low, so filling AT the level
         is not optimism: price genuinely traded there inside this bar.
         """
+        # Break-even manages a trade that is ALREADY open; the pullback logic
+        # below only ever runs when nothing is open. They cannot both apply to
+        # the same bar, so this goes first and the pullback guard stays exactly
+        # as it was.
+        self._maybe_breakeven(bar)
+
         if self._pullback_side is None:
             return
 

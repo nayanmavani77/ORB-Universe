@@ -62,6 +62,17 @@ class OrbReverseStrategy(OrbStrategy):
 
     # ------------------------------------------------------------------
     @property
+    def STRATEGY_LETTER(self) -> str:                        # noqa: N802
+        """`R` for a reversal, `O` when this engine runs the FORWARD control arm.
+
+        The letter names what the trade actually is, not which engine produced
+        it. `direction: forward` on this engine is an ordinary breakout — it
+        exists as the control to compare a fade against — so calling it `R` in
+        the terminal would mislabel the very trades you are comparing.
+        """
+        return "R" if self.reverse else "O"
+
+    @property
     def sl_range_mult(self) -> float:
         return self.settings.sl_range_mult
 

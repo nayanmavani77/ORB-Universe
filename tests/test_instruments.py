@@ -440,7 +440,10 @@ def test_a_sweep_runs_the_whole_grid_once_per_instrument():
     rc = RunConfig.load("orb")
     rc.sweep.update({"sessions": ["ASIA"], "timeframes": ["M5"],
                      "orb_minutes": [15], "risk_reward": [2.0],
-                     "news": ["skip"], "sl_modes": ["mid_range"]})
+                     "news": ["skip"], "sl_modes": ["mid_range"],
+                     # pinned: these tests measure per-instrument expansion and
+                     # run naming, not how many axes the grid happens to have
+                     "trade_caps": [0], "breakevens": ["off"]})
     rc.app.instruments = {"gc": copy.deepcopy(GC), "es": copy.deepcopy(ES)}
 
     one = rc.sweep_size({"instruments": ["gc"]})
@@ -465,7 +468,10 @@ def test_a_single_instrument_sweep_keeps_the_run_names_it_always_had():
     rc = RunConfig.load("orb")
     rc.sweep.update({"sessions": ["ASIA"], "timeframes": ["M5"],
                      "orb_minutes": [15], "risk_reward": [2.0],
-                     "news": ["skip"], "sl_modes": ["mid_range"]})
+                     "news": ["skip"], "sl_modes": ["mid_range"],
+                     # pinned: these tests measure per-instrument expansion and
+                     # run naming, not how many axes the grid happens to have
+                     "trade_caps": [0], "breakevens": ["off"]})
     rc.app.instruments = {"gc": copy.deepcopy(GC)}
     item = rc.sweep_items({"instruments": ["gc"]})[0]
     assert item.run_name == "M5_ASIA_ORB15_SKIP_NEWS_RR2"

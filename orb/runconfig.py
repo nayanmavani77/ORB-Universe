@@ -513,6 +513,13 @@ def _apply_run_overrides(session: StrategyConfig, o: Dict[str, Any],
         # trades took 6. Exposed as a flag here so `--set` never has to reach
         # for it (which `EngineSettings.from_options` correctly refuses).
         session.max_trades_per_session = int(o["max_trades_per_session"])
+    if o.get("breakeven") is not None:
+        # SESSION fields, same reason as the two above: the core enforces
+        # break-even, so `--set` (which reaches engine options) must not be the
+        # way to set it.
+        session.breakeven = bool(o["breakeven"])
+    if o.get("breakeven_trigger_r") is not None:
+        session.breakeven_trigger_r = float(o["breakeven_trigger_r"])
     if o.get("pullback_entry") is not None:
         # Also a SESSION field, for the same reason as the cap above: the core
         # enforces it, so `--set` (which reaches engine options) must not be

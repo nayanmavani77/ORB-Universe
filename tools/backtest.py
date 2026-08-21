@@ -128,6 +128,7 @@ FLAG_NAMES = {
     "instruments": "--instruments",
     "max_trades_per_session": "--max-trades",
     "pullback_entry": "--pullback",
+    "breakeven": "--breakeven", "breakeven_trigger_r": "--breakeven-trigger",
     "options": "--set", "sl_mult": "--sl-mult",
     "forward": "--forward", "reverse": "--reverse",
 }
@@ -297,6 +298,19 @@ def main() -> int:
                    default=None, metavar="N",
                    help="cap trades per session for this run; 0 = unlimited. "
                         "A session field, so it does NOT go through --set.")
+    g.add_argument("--breakeven", dest="breakeven", action="store_true",
+                   default=None,
+                   help="move the stop loss to the entry price once the trade "
+                        "is far enough in front (see --breakeven-trigger). "
+                        "A session field, so it does NOT go through --set.")
+    g.add_argument("--no-breakeven", dest="breakeven", action="store_false",
+                   help="leave the stop where it was placed for this run, "
+                        "whatever the config says.")
+    g.add_argument("--breakeven-trigger", dest="breakeven_trigger_r",
+                   type=float, default=None, metavar="R",
+                   help="how far in front the trade must be before the stop "
+                        "moves to entry, as a multiple of its own risk. "
+                        "1.0 = 1:1. Only used with --breakeven.")
     g.add_argument("--pullback", dest="pullback_entry", action="store_true",
                    default=None,
                    help="enter on a PULLBACK to the level that broke, instead "
@@ -350,7 +364,7 @@ def main() -> int:
     run_over = {k: getattr(a, k) for k in
                 ("session", "signal_timeframe", "orb_minutes", "risk_reward",
                  "lots", "news", "log_level", "max_trades_per_session",
-                 "pullback_entry")}
+                 "pullback_entry", "breakeven", "breakeven_trigger_r")}
     if a.start:
         rc.period["start"] = a.start
     if a.end:

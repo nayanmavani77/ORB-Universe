@@ -144,10 +144,11 @@ class OrbReverseSettings(EngineSettings):
         self.validate()
         cfg.engine = "orb_reverse"
         cfg.engine_options = self.to_options()
-        base = str(cfg.comment or "").strip()
-        prefix = self.order_tag if self.reverse else "FWD"
-        if not base.startswith(prefix):
-            cfg.comment = f"{prefix} {base}".strip()
+        # The order comment is no longer where the direction is announced: the
+        # tag every order carries starts with `R` for a fade and `O` for the
+        # forward control arm. Prepending `REV` here as well would spend
+        # characters repeating what the first letter already says, and would
+        # push a custom comment out of MT5's 31-character limit sooner.
         return cfg
 
     def apply_to(self, app):

@@ -66,6 +66,10 @@ def trades_dataframe(trades: Sequence[ClosedTrade]) -> pd.DataFrame:
             "commission": t.commission,
             "net_profit": t.net_profit,
             "r_multiple": t.r_multiple,
+            # the risk R is measured against, and whether the stop was moved to
+            # the entry before this trade ended
+            "initial_risk": t.initial_risk,
+            "breakeven": bool(t.breakeven),
             "balance_after": t.balance_after,
         })
     df = pd.DataFrame(rows)
@@ -157,7 +161,8 @@ def compute_stats(result) -> Dict[str, object]:
             "max_consecutive_wins_profit", "max_consecutive_losses_loss",
             "max_dd_money", "max_dd_pct", "recovery_factor", "sharpe_per_trade",
             "held_past_entry_day", "held_past_entry_day_net",
-            "held_past_entry_day_share", "max_hold_hours")})
+            "held_past_entry_day_share", "max_hold_hours",
+            "be_moved", "be_flat", "be_won", "be_lost", "be_net")})
         s["exit_reasons"] = {}
         s["dd_peak_time"] = s["dd_trough_time"] = s["dd_recovery_time"] = None
         return s
@@ -188,6 +193,21 @@ def compute_stats(result) -> Dict[str, object]:
     s["long_net"] = float(df.loc[df["direction"] == "BUY", "net_profit"].sum())
     s["short_net"] = float(df.loc[df["direction"] == "SELL", "net_profit"].sum())
     s["exit_reasons"] = df["exit_reason"].value_counts().to_dict()
+
+    # BREAK EVEN. Every figure here is a count of what HAPPENED; none of them
+    # is a verdict on whether break-even paid. That question needs the same
+    # period run with it off, because the trades it closed flat would each have
+    # gone on to win or to lose and one run cannot say which.
+    be = df["breakeven"].astype(bool) if "breakeven" in df.columns else \
+        pd.Series(False, index=df.index)
+    s["be_moved"] = int(be.sum())
+    s["be_flat"] = int((be & (net == 0)).sum())
+    s["be_won"] = int((be & (net > 0)).sum())
+    # A stop AT the entry still loses if the bar gaps through it — the fill is
+    # where the market reopened, not where the order sat. Counted separately
+    # because a report claiming break-even trades cannot lose would be wrong.
+    s["be_lost"] = int((be & (net < 0)).sum())
+    s["be_net"] = float(net[be].sum())
     s.update(_streaks(net.tolist()))
 
     # trades that survived past their own entry day: these carry gap risk the
@@ -384,6 +404,123 @@ def deep_analysis(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
             "net_profit", ascending=False)
         out["exit_reason"].index.name = "How the trade ended"
 
+    return out
+
+
+def robustness(df: pd.DataFrame, result) -> Dict[str, object]:
+    """How much of this result you should believe.
+
+    The headline numbers say what happened. These say whether it is likely to
+    happen again, and they are the ones that change a decision:
+
+      * CONCENTRATION — how much of the profit came from a handful of trades or
+        a single month. A curve that is flat for five months and then jumps is
+        one regime, not an edge, and no amount of profit factor will tell you
+        that.
+      * STABILITY — first half against second half. An edge that only exists in
+        the recent half may be real and improving, or may be the sample you
+        happened to fit to.
+      * CONFIDENCE — 387 trades at +0.17R sounds solid until you notice the
+        standard deviation is 1.45R. The standard error and t-statistic say
+        whether the average is distinguishable from zero at all.
+      * ENDURANCE — the longest time spent below the previous peak. Depth is
+        what most reports show; duration is what people actually quit during.
+      * HEADROOM — the cost per trade at which the edge disappears. Costs are
+        deliberately NOT applied anywhere in this report, so this is the one
+        honest way to say how much room there is.
+    """
+    out: Dict[str, object] = {}
+    if df is None or df.empty:
+        return out
+    d = df.sort_values("entry_time").reset_index(drop=True)
+    n = len(d)
+    net = float(d["net_profit"].sum())
+    out["trades"], out["net"] = n, net
+
+    # --- concentration -------------------------------------------------
+    if "session" in d.columns:
+        months = d.groupby(pd.to_datetime(d["session"]).dt.to_period("M"))["net_profit"].sum()
+        if len(months):
+            best = months.sort_values(ascending=False)
+            out["best_month"] = str(best.index[0])
+            out["best_month_net"] = float(best.iloc[0])
+            out["net_ex_best_month"] = net - float(best.iloc[0])
+            out["months_total"] = int(len(months))
+            out["months_positive"] = int((months > 0).sum())
+    # WHERE the winners came from, not just how few there are.
+    #
+    # "x% of the profit came from the best 5% of trades" is close to a
+    # tautology for any low-win-rate trend follower: small losses, rare large
+    # wins, so of course the tail carries it. Reporting that as a fault flags
+    # the normal case as broken, and it says nothing the month concentration
+    # below does not already say.
+    #
+    # The question worth asking is whether those winners are INDEPENDENT
+    # events or one regime cut into pieces. Fifty-nine winners spread over two
+    # years is a strategy; fifty-nine winners inside one quarter is a single
+    # bet that happened to be sliced into fifty-nine tickets.
+    k = max(1, int(round(n * 0.05)))
+    top_idx = d["net_profit"].nlargest(k).index
+    out["top_k"] = k
+    out["top_k_net"] = float(d.loc[top_idx, "net_profit"].sum())
+    when = pd.to_datetime(d.loc[top_idx, "entry_time"])
+    if len(when):
+        out["tail_months"] = int(when.dt.to_period("M").nunique())
+        by_q = d.loc[top_idx].groupby(when.dt.to_period("Q"))["net_profit"].sum()
+        by_q = by_q.sort_values(ascending=False)
+        out["tail_best_quarter"] = str(by_q.index[0])
+        tail_net = float(d.loc[top_idx, "net_profit"].sum())
+        out["tail_quarter_share"] = (float(by_q.iloc[0]) / tail_net * 100.0
+                                     if tail_net else 0.0)
+        out["tail_quarters"] = int(len(by_q))
+
+    # --- stability ------------------------------------------------------
+    half = n // 2
+    halves = []
+    for lo, hi in ((0, half), (half, n)):
+        p = d.iloc[lo:hi]
+        if p.empty:
+            continue
+        wins = float(p.loc[p["net_profit"] > 0, "net_profit"].sum())
+        loss = float(-p.loc[p["net_profit"] < 0, "net_profit"].sum())
+        halves.append({
+            "trades": len(p),
+            "net": float(p["net_profit"].sum()),
+            "avg_r": float(p["r_multiple"].mean()),
+            "win_rate": float((p["net_profit"] > 0).mean() * 100.0),
+            "profit_factor": (wins / loss) if loss else float("inf"),
+            "from": pd.to_datetime(p["entry_time"]).min(),
+            "to": pd.to_datetime(p["entry_time"]).max(),
+        })
+    out["halves"] = halves
+
+    # --- confidence -----------------------------------------------------
+    r = d["r_multiple"].dropna().astype(float)
+    if len(r) > 2:
+        sd = float(r.std(ddof=1))
+        se = sd / math.sqrt(len(r))
+        out["avg_r"], out["sd_r"], out["se_r"] = float(r.mean()), sd, se
+        out["t_stat"] = (float(r.mean()) / se) if se else 0.0
+        out["ci_lo"] = float(r.mean()) - 1.96 * se
+        out["ci_hi"] = float(r.mean()) + 1.96 * se
+
+    # --- endurance ------------------------------------------------------
+    bal = d.sort_values("exit_time")
+    if "balance_after" in bal.columns and len(bal) > 1:
+        b = bal.set_index(pd.to_datetime(bal["exit_time"]))["balance_after"].astype(float)
+        under = b < b.cummax()
+        if under.any():
+            grp = (under != under.shift()).cumsum()
+            worst, when = 0, None
+            for _g, seg in b[under].groupby(grp[under]):
+                days = (seg.index[-1] - seg.index[0]).days
+                if days >= worst:
+                    worst, when = days, (seg.index[0], seg.index[-1])
+            out["underwater_days"] = int(worst)
+            out["underwater_span"] = when
+            out["recovered"] = bool(not under.iloc[-1])
+
+    out["breakeven_cost"] = net / n if n else 0.0
     return out
 
 
@@ -713,6 +850,42 @@ h3{font-size:15.5px;margin:0 0 3px;font-weight:600}
  font-variant-numeric:tabular-nums;line-height:1.15}
 .kpi .m{color:var(--text-muted);font-size:12px;margin-top:3px}
 .pos{color:var(--pos)} .neg{color:var(--neg)} .muted{color:var(--text-muted)}
+.rb-list{display:flex;flex-direction:column}
+.rrow{display:grid;grid-template-columns:170px 190px 78px 1fr;gap:14px;
+align-items:baseline;padding:14px 0;border-bottom:1px solid var(--line)}
+.rrow:last-child{border-bottom:0}
+.rlab{font-weight:650;font-size:13px}
+.rnum{font-variant-numeric:tabular-nums;font-size:19px;font-weight:600;line-height:1.25}
+.rsay{font-size:13px;color:var(--text-secondary);line-height:1.5}
+.verdict{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;
+padding:2px 7px;border-radius:5px;text-align:center;
+background:var(--surface-3);color:var(--text-secondary)}
+.verdict.pos{background:#e7f3ec;color:#1b7f4d}
+.verdict.neg{background:#fbeae8;color:#c0392b}
+/* The one line to read before the rows. Text carries the meaning; the
+   rule beside it is decoration, so it survives greyscale and CVD. */
+.lead-finding{margin:0 0 14px;padding:9px 13px;font-size:13.5px;
+line-height:1.5;color:var(--text-primary);background:var(--surface-3);
+border-left:3px solid #c0392b;border-radius:0 6px 6px 0}
+/* Dark is CHOSEN, not an automatic flip: the chips get their own steps against
+   the dark surface rather than inheriting light backgrounds that would glare. */
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme=light])) .viz{
+  --chip-pos-bg:#12331f;--chip-neg-bg:#3a1b18}}
+:root[data-theme=dark] .viz{--chip-pos-bg:#12331f;--chip-neg-bg:#3a1b18}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme=light])) .viz
+  .verdict.pos{background:#12331f;color:#4ec27f}
+  }
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme=light])) .viz
+  .verdict.neg{background:#3a1b18;color:#e66767}
+  }
+:root[data-theme=dark] .viz .verdict.pos{background:#12331f;color:#4ec27f}
+:root[data-theme=dark] .viz .verdict.neg{background:#3a1b18;color:#e66767}
+.vtext{}
+.chart{width:100%;height:auto;display:block}
+.svg-val{font-size:11px;fill:var(--text-secondary);font-variant-numeric:tabular-nums}
+.svg-ax{font-size:11px;fill:var(--text-muted)}
+@media (max-width:900px){.rrow{grid-template-columns:1fr;gap:4px}}
+section{margin-top:26px}
 .swatch{width:10px;height:10px;border-radius:3px;display:inline-block;
  margin-right:7px;vertical-align:middle}
 .legend{display:flex;gap:16px;flex-wrap:wrap;margin:2px 0 12px;
@@ -903,10 +1076,291 @@ def _hbar_table(t: pd.DataFrame, cur: str, value="net_profit",
     return f'<div class="hb">{"".join(rows)}</div>'
 
 
+def _svg_monthly(df: pd.DataFrame, cur: str) -> str:
+    """Month-by-month P&L as diverging bars on one zero line.
+
+    The monthly numbers were already in the report as a list. A list makes you
+    compare thirteen figures in your head; a bar chart on a shared baseline
+    makes a single dominant month impossible to miss, which is the whole reason
+    the breakdown exists.
+
+    Sign is carried by position (above / below the zero line) as well as by
+    colour, and every bar is labelled, so nothing depends on telling red from
+    green.
+    """
+    if df is None or df.empty or "session" not in df.columns:
+        return '<p class="muted">No data.</p>'
+    m = df.groupby(pd.to_datetime(df["session"]).dt.to_period("M"))["net_profit"].sum()
+    if m.empty:
+        return '<p class="muted">No data.</p>'
+    W, H = 1000, 280
+    padl, padr, padt, padb = 8, 8, 26, 52
+    # The zero line sits where the DATA puts it, not at the halfway mark. With
+    # twelve positive months and one negative, a centred axis would waste half
+    # the panel below the line and squash every bar above it.
+    hi = float(max(m.max(), 0.0))
+    lo = float(min(m.min(), 0.0))
+    span = (hi - lo) or 1.0
+    inner_w = W - padl - padr
+    inner_h = H - padt - padb
+    zero = padt + inner_h * (hi / span)
+    slot = inner_w / len(m)
+    bw = min(56.0, slot * 0.62)
+    bars, labels = [], []
+    for i, (per, v) in enumerate(m.items()):
+        cx = padl + slot * (i + 0.5)
+        h = abs(float(v)) / span * inner_h
+        y = zero - h if v >= 0 else zero
+        col = "var(--pos-soft)" if v >= 0 else "var(--neg-soft)"
+        tip = f"{per} - {_m(float(v), cur)}"
+        bars.append(
+            f'<rect x="{cx - bw / 2:.1f}" y="{y:.1f}" width="{bw:.1f}" '
+            f'height="{max(h, 1.2):.1f}" rx="4" fill="{col}" '
+            f'data-tip="{html.escape(tip)}"><title>{html.escape(tip)}</title></rect>')
+        vy = (y - 7) if v >= 0 else (y + h + 15)
+        labels.append(
+            f'<text x="{cx:.1f}" y="{vy:.1f}" text-anchor="middle" '
+            f'class="svg-val">{html.escape(_m(float(v), ""))}</text>')
+        labels.append(
+            f'<text x="{cx:.1f}" y="{H - 10}" text-anchor="middle" '
+            f'class="svg-ax">{html.escape(str(per)[2:])}</text>')
+    return f"""<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"
+     class="chart" role="img" aria-label="Net P&L by month">
+  <line x1="{padl}" y1="{zero:.1f}" x2="{W - padr}" y2="{zero:.1f}"
+        stroke="var(--line)" stroke-width="1"/>
+  {''.join(bars)}
+  {''.join(labels)}
+</svg>"""
+
+
+def _svg_rolling_r(df: pd.DataFrame, window: int = 50) -> str:
+    """Rolling average R over the trade sequence.
+
+    The equity curve answers "how much"; this answers "was the edge there all
+    along". A line that sits below zero for a third of the sample and only
+    lifts later is the same story as a flat-then-vertical equity curve, but
+    stated per trade, so a couple of outsized wins cannot flatter it.
+
+    Labels live in the gutters, never over the plot, and the y-axis is
+    annotated at its extremes and at zero — without a scale a line chart shows
+    a shape but no magnitude, which is how "it goes up" gets mistaken for "it
+    goes up enough".
+    """
+    if df is None or df.empty or "r_multiple" not in df.columns:
+        return '<p class="muted">No data.</p>'
+    r = (df.sort_values("entry_time")["r_multiple"].dropna().astype(float)
+         .reset_index(drop=True))
+    if len(r) < window + 5:
+        return ('<p class="muted">Not enough trades for a '
+                f'{window}-trade rolling view.</p>')
+    roll = r.rolling(window).mean().dropna().reset_index(drop=True)
+
+    W, H = 1000, 250
+    padl, padr, padt, padb = 62, 12, 16, 34
+    lo, hi = float(roll.min()), float(roll.max())
+    pad = max(0.05, (hi - lo) * 0.15)
+    lo, hi = min(lo - pad, 0.0), max(hi + pad, 0.0)
+    rng = (hi - lo) or 1.0
+    iw, ih = W - padl - padr, H - padt - padb
+
+    def x(i):
+        return padl + iw * (i / max(1, len(roll) - 1))
+
+    def y(v):
+        return padt + ih * (1 - (v - lo) / rng)
+
+    zero_y, avg = y(0.0), float(r.mean())
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(roll))
+    # the area between the line and zero, so time spent losing reads as area
+    area = (f"{padl},{zero_y:.1f} " + pts + f" {x(len(roll) - 1):.1f},{zero_y:.1f}")
+    def _tick(v):
+        dash = "" if v == 0 else ' stroke-dasharray="3 5"'
+        return (f'<line x1="{padl}" y1="{y(v):.1f}" x2="{W - padr}" '
+                f'y2="{y(v):.1f}" stroke="var(--line)" stroke-width="1"{dash}/>'
+                f'<text x="{padl - 8}" y="{y(v) + 4:.1f}" text-anchor="end" '
+                f'class="svg-ax">{v:+.2f}R</text>')
+
+    ticks = "".join(_tick(v) for v in (hi, 0.0, lo) if lo <= v <= hi)
+    return f"""<svg viewBox="0 0 {W} {H}" preserveAspectRatio="none"
+     class="chart" role="img"
+     aria-label="Rolling {window}-trade average R over the trade sequence">
+  {ticks}
+  <polygon points="{area}" fill="var(--s-1)" fill-opacity=".13"/>
+  <polyline points="{pts}" fill="none" stroke="var(--s-1)" stroke-width="2"
+            stroke-linejoin="round" stroke-linecap="round"/>
+  <line x1="{padl}" y1="{y(avg):.1f}" x2="{W - padr}" y2="{y(avg):.1f}"
+        stroke="var(--text-muted)" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="{padl}" y="{H - 12}" class="svg-ax">trade {window}</text>
+  <text x="{(padl + W - padr) / 2:.0f}" y="{H - 12}" text-anchor="middle"
+        class="svg-ax">dashed line = whole-sample average {avg:+.2f}R</text>
+  <text x="{W - padr}" y="{H - 12}" text-anchor="end"
+        class="svg-ax">trade {len(r)}</text>
+</svg>"""
+
+
 def _panel(title: str, note: str, body: str) -> str:
     return (f'<section><h3>{html.escape(title)}</h3>'
             f'<p class="note">{html.escape(note)}</p>'
             f'<div class="card">{body}</div></section>')
+
+
+def _verdict(ok: bool, warn: bool, text: str) -> str:
+    """A finding with a word, not just a colour.
+
+    Status colour is never the only carrier: each row states GOOD / WATCH /
+    FRAGILE in text as well, so the panel reads the same in greyscale and to a
+    colour-blind reader.
+    """
+    state = "FRAGILE" if warn else ("GOOD" if ok else "WATCH")
+    cls = "neg" if warn else ("pos" if ok else "")
+    #: rank alongside the label, so the panel can lead with the worst
+    rank = 0 if warn else (2 if ok else 1)
+    return (f'<span class="verdict {cls}">{state}</span>', text, rank)
+
+
+#: What to read first when several checks fail, most damning first.
+#:
+#: The order is a chain of reasoning, not a ranking of numbers. If the sample
+#: cannot show an edge exists, nothing after it matters; if the winners turn
+#: out to be one regime, the edge that does show up is one observation; and so
+#: on down to cost, which only matters once something survives the rest.
+_FINDING_ORDER = [
+    "Confidence",
+    "Winners &mdash; spread or clustered",
+    "Stability",
+    "Concentration &mdash; months",
+    "Endurance",
+    "Cost headroom",
+]
+
+
+def _robustness_panel(rb: Dict, cur: str) -> str:
+    """The questions that decide whether to trade this."""
+    if not rb:
+        return '<p class="muted">No trades.</p>'
+    net, n = rb.get("net", 0.0), rb.get("trades", 0)
+    rows = []
+
+    # Are the winners independent events, or one regime in slices?
+    if "tail_quarter_share" in rb:
+        k = rb.get("top_k", 0)
+        share = rb["tail_quarter_share"]
+        months, quarters = rb["tail_months"], rb["tail_quarters"]
+        rows.append((
+            "Winners &mdash; spread or clustered",
+            f"{share:,.0f}% in {rb['tail_best_quarter']}",
+            _verdict(share < 40 and months >= 6, share > 60 or months <= 3,
+                     f"The best {k} trades ({k / n * 100:.0f}% of the book) "
+                     f"carry the result. They fall in {months} different "
+                     f"month(s) across {quarters} quarter(s), and "
+                     f"{share:,.0f}% of what they made landed in "
+                     f"{rb['tail_best_quarter']} alone. "
+                     + ("Spread across many periods, so they read as "
+                        "independent opportunities."
+                        if share < 40 and months >= 6 else
+                        "That is one market regime cut into pieces, not "
+                        "many separate chances &mdash; the honest sample "
+                        "size is the number of regimes, not the number of "
+                        "trades."))))
+
+    # concentration — months
+    if "best_month_net" in rb and net:
+        bm = rb["best_month_net"]
+        share = bm / net * 100.0
+        rows.append((
+            "Concentration &mdash; months",
+            f"{share:,.0f}% from {rb['best_month']}",
+            _verdict(share < 40, share > 60,
+                     f"{rb['best_month']} alone made {_m(bm, cur)}; the other "
+                     f"{rb['months_total'] - 1} months made "
+                     f"{_m(rb['net_ex_best_month'], cur)} between them. "
+                     f"{rb['months_positive']} of {rb['months_total']} months "
+                     f"were positive.")))
+
+    # stability
+    h = rb.get("halves") or []
+    if len(h) == 2:
+        a, b = h
+        rows.append((
+            "Stability",
+            f"{a['avg_r']:+.2f}R &rarr; {b['avg_r']:+.2f}R",
+            _verdict(abs(a["avg_r"] - b["avg_r"]) < 0.10,
+                     (a["avg_r"] <= 0) != (b["avg_r"] <= 0)
+                     or abs(a["avg_r"] - b["avg_r"]) > 0.15,
+                     f"First half: {a['trades']} trades, {_m(a['net'], cur)}, "
+                     f"PF {a['profit_factor']:.2f}. Second half: {b['trades']} "
+                     f"trades, {_m(b['net'], cur)}, PF "
+                     f"{b['profit_factor']:.2f}.")))
+
+    # confidence
+    if "t_stat" in rb:
+        t = rb["t_stat"]
+        rows.append((
+            "Confidence",
+            f"t = {t:.2f}",
+            _verdict(t >= 3.0, t < 2.0,
+                     f"Average {rb['avg_r']:+.3f}R with a standard deviation of "
+                     f"{rb['sd_r']:.2f}R over {n} trades. 95% confidence "
+                     f"interval {rb['ci_lo']:+.3f}R to {rb['ci_hi']:+.3f}R. "
+                     + ("The interval excludes zero, but only just &mdash; "
+                        "treat the size of the edge as unresolved."
+                        if 2.0 <= t < 3.0 else
+                        "The interval spans zero, so this sample cannot "
+                        "distinguish the edge from chance."
+                        if t < 2.0 else
+                        "Comfortably clear of zero for this sample size."))))
+
+    # endurance
+    if "underwater_days" in rb:
+        days = rb["underwater_days"]
+        rec = rb.get("recovered", True)
+        rows.append((
+            "Endurance",
+            f"{days} days underwater",
+            _verdict(days < 60, days > 120 or not rec,
+                     f"Longest stretch below the previous peak: {days} days"
+                     + (f" ({rb['underwater_span'][0]:%Y-%m-%d} to "
+                        f"{rb['underwater_span'][1]:%Y-%m-%d})"
+                        if rb.get("underwater_span") else "")
+                     + (". The curve ended below its peak."
+                        if not rec else ". Fully recovered."))))
+
+    # headroom
+    be = rb.get("breakeven_cost", 0.0)
+    rows.append((
+        "Cost headroom",
+        f"{_m(be, cur)} / trade",
+        _verdict(be > 0, be <= 0,
+                 "Every figure in this report is GROSS. This is the round-trip "
+                 "cost per trade at which the edge reaches zero &mdash; compare "
+                 "it against your own spread, slippage and commission.")))
+
+    # WORST FIRST. Six rows all reading FRAGILE is the same as none of
+    # them reading FRAGILE: the eye flattens them, and the check that
+    # should stop you gets the same weight as the one merely noting a
+    # wide interval. Within a severity the original order is kept, so
+    # the panel still reads as a sequence rather than reshuffling.
+    def _priority(row):
+        try:
+            return _FINDING_ORDER.index(row[0])
+        except ValueError:
+            return len(_FINDING_ORDER)
+
+    rows.sort(key=lambda r: (r[2][2], _priority(r)))
+
+    worst = [r for r in rows if r[2][2] == 0]
+    lead = ""
+    if worst:
+        lead = (f'<p class="lead-finding"><strong>Read this first:</strong> '
+                f'{worst[0][0]} &mdash; {worst[0][1]}. '
+                f'{len(worst)} of {len(rows)} checks came back FRAGILE.</p>')
+
+    body = "".join(
+        f'<div class="rrow"><div class="rlab">{lab}</div>'
+        f'<div class="rnum">{num}</div><div>{say[0]}</div>'
+        f'<div class="rsay">{say[1]}</div></div>'
+        for lab, num, say in rows)
+    return f'{lead}<div class="rb-list">{body}</div>'
 
 
 def _findings(stats: Dict, deep: Dict, cur: str) -> str:
@@ -1270,6 +1724,7 @@ def build_html(result, stats: Dict, df: pd.DataFrame,
     cfg = result.config
     cur = cfg.symbol.currency
     deep = deep_analysis(df)
+    rb = robustness(df, result)
     times, eq, dd = equity_series(result)
 
     net = stats["net_profit"]
@@ -1288,6 +1743,31 @@ def build_html(result, stats: Dict, df: pd.DataFrame,
         kpi("Average R", f"{stats['avg_r']:+.2f}R",
             f"{stats['total_r']:+,.1f}R total"),
     ])
+
+    # BREAK EVEN. Rendered only when the stop actually moved on at least one
+    # trade, so every report predating the feature — and every run with it off
+    # — looks exactly as it always did.
+    be_block = ""
+    if int(stats.get("be_moved", 0)) > 0:
+        moved = int(stats["be_moved"])
+        flat, won = int(stats["be_flat"]), int(stats["be_won"])
+        lost = int(stats["be_lost"])
+        share = moved / stats["total_trades"] * 100.0 if stats["total_trades"] else 0.0
+        be_block = _panel(
+            "Break even",
+            "What the stop move did — counts, not a verdict. The trades it "
+            "closed flat would each have gone on to win or to lose, and one "
+            "run cannot say which. Run the same period with break-even off to "
+            "score it. A stop at the entry is not a guarantee: price can gap "
+            "straight through it and fill worse.",
+            _kv([("Trades that reached the trigger",
+                  f"{moved:,} of {stats['total_trades']:,} ({share:.1f}%)", ""),
+                 ("— closed flat at the entry", f"{flat:,}", ""),
+                 ("— went on to win", f"{won:,}", "pos" if won else ""),
+                 ("— still lost, to a gap through the stop", f"{lost:,}",
+                  "neg" if lost else ""),
+                 ("Net from those trades", _m(stats['be_net'], cur),
+                  "pos" if stats['be_net'] > 0 else "neg")]))
 
     sess_block = ""
     if bd.get("session") is not None and not bd["session"].empty \
@@ -1337,6 +1817,28 @@ def build_html(result, stats: Dict, df: pd.DataFrame,
   <div class="card">{_svg_equity(times, eq, dd, result.initial_balance, cur)}</div>
 </section>
 
+<h2>How much to believe it</h2>
+<p class="note" style="margin:-6px 0 14px">The headline says what happened.
+These say whether it is likely to happen again &mdash; concentration, stability,
+statistical confidence, how long it stayed underwater, and how much cost it can
+carry before the edge is gone.</p>
+<div class="card">{_robustness_panel(rb, cur)}</div>
+
+<section>
+  <h3>Month by month</h3>
+  <p class="note">Attributed to the session date. One dominant bar is a regime,
+  not an edge &mdash; and it is far easier to see here than in a column of
+  thirteen numbers.</p>
+  <div class="card">{_svg_monthly(df, cur)}</div>
+</section>
+
+<section>
+  <h3>Rolling average R (50 trades)</h3>
+  <p class="note">Per trade, so a couple of outsized wins cannot flatter it.
+  Where this sits relative to the 0R line is where the edge actually was.</p>
+  <div class="card">{_svg_rolling_r(df)}</div>
+</section>
+
 <h2>Sessions actually run</h2>
 <div class="card">{_instruments_table(df)}{_sessions_table(cfg, result, df)}
 <p class="note" style="margin:12px 0 0">The settings each session ran with,
@@ -1352,6 +1854,7 @@ including any per-session override. All times are server time.</p></div>
           "P&L by exit reason, not just how often each exit fired.",
           _hbar_table(deep.get('exit_reason'), cur))}
 </div>
+{be_block}
 <div class="two">
   {_panel("Opening range width",
           "Trades split into five equal groups by the size of the range they broke "
@@ -1384,10 +1887,6 @@ including any per-session override. All times are server time.</p></div>
           "The hour the breakout fired.",
           _hbar_table(bd['hourly'], cur))}
 </div>
-{_panel("By month",
-        "Attributed to the session date. A result that lives in one or two months "
-        "is a regime, not an edge.",
-        _hbar_table(bd['monthly'], cur))}
 
 {_session_blocks(result, df, cur)}
 

@@ -388,13 +388,18 @@ def main() -> int:
                ("sl_mode", "by_sl_mode"),
                ("sl_range_mult", "by_sl_multiplier"),
                ("max_trades_per_session", "by_trade_cap"),
+               ("breakeven", "by_breakeven"),
                ("direction", "by_direction")]
     pairs = [(["instrument", "risk_reward"], "by_instrument_x_rr"),
              (["instrument", "session"], "by_instrument_x_session"),
              (["sl_range_mult", "risk_reward"], "by_sl_mult_x_rr"),
              (["sl_range_mult", "direction"], "by_sl_mult_x_direction"),
              (["sl_range_mult", "max_trades_per_session"], "by_sl_mult_x_cap"),
-             (["signal_timeframe", "session"], "by_timeframe_session")]
+             (["signal_timeframe", "session"], "by_timeframe_session"),
+             # break-even changes what a target is worth, so its interaction
+             # with R:R is the pair worth having: a stop at the entry costs
+             # more the further away the target is.
+             (["breakeven", "risk_reward"], "by_breakeven_x_rr")]
     for by, fname in singles + pairs:
         cols = [by] if isinstance(by, str) else by
         if not all(c in df.columns and df[c].nunique() > 1 for c in cols):

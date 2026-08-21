@@ -40,6 +40,28 @@ class Position:
     range_mid: float = 0.0
     trade_no_in_session: int = 0
     entry_commission: float = 0.0
+    #: The risk this trade was OPENED with, in price units. Recorded once, at
+    #: the fill, because `sl` may move afterwards -- break-even puts it ON the
+    #: entry price, which would make `abs(entry - sl)` zero and every
+    #: R-multiple computed from it a lie. R means "times the risk I actually
+    #: took", so it is measured against this and nothing else.
+    initial_risk: float = 0.0
+    #: Where the SIGNAL fired, in FEED space. Equal to `entry_price` whenever
+    #: signal and execution are the same instrument (every backtest, and live
+    #: on one symbol). It differs only under `translate_levels`, where the feed
+    #: quotes tens of dollars away from the broker -- and any test measured
+    #: against feed bars, break-even included, has to use this one.
+    signal_entry: float = 0.0
+    #: Price the stop was moved to by break-even. 0.0 = never moved, which is
+    #: also how "has break-even already fired" is answered.
+    breakeven_at: float = 0.0
+    #: The bar during which break-even moved the stop. A bar's OPEN is normally
+    #: tested for a gap straight through the stop, but a stop placed part-way
+    #: through a bar did not exist at that bar's open and cannot be gapped by
+    #: it. On the entry bar the two prices are the same number -- the fill IS
+    #: the open, and break-even puts the stop on the fill -- so without this
+    #: the trade would close the instant break-even armed.
+    breakeven_bar: Optional[datetime] = None
 
 
 @dataclass
@@ -65,6 +87,10 @@ class ClosedTrade:
     range_mid: float
     trade_no_in_session: int
     r_multiple: float
+    #: risk at entry, in price units -- what `r_multiple` is measured against
+    initial_risk: float = 0.0
+    #: did the stop get moved to break-even before this trade ended?
+    breakeven: bool = False
     #: which instrument the trade was on. Empty for a single-instrument run.
     instrument: str = ""
 
@@ -250,6 +276,17 @@ class InstrumentView:
     # --- positions, all scoped ----------------------------------------
     def positions_count(self) -> int:
         return self._broker.positions_count(self.instrument)
+
+    def position_for(self, instrument: str = "") -> Optional[Position]:
+        """THIS instrument's open position.
+
+        Without this override `__getattr__` would forward to the account
+        broker with no instrument, which answers for whichever position it
+        keeps under the empty key — so a GC session could read an ES position
+        and move ITS stop. Every other position accessor here is scoped; this
+        one has to be too.
+        """
+        return self._broker.position_for(instrument or self.instrument)
 
     def open_market(self, is_buy: bool, lots: float, sl: float, comment: str,
                     magic: int = 0, price: Optional[float] = None):
@@ -477,11 +514,16 @@ class SimBroker(Broker):
 
         sl_hit = tp_hit = False
         sl_price = tp_price = 0.0
+        # Was the stop already in place when this bar opened? If break-even
+        # moved it DURING this bar, no -- so the open cannot have gapped
+        # through it. The intrabar high/low tests below still apply: those are
+        # the touch that Story A resolves pessimistically.
+        sl_at_open = pos.breakeven_bar != bar.time
 
         if pos.is_buy:
             # SL is below, TP is above; buys exit on the bid
             if pos.sl > 0:
-                if bar.open <= pos.sl:
+                if sl_at_open and bar.open <= pos.sl:
                     sl_hit, sl_price = True, bar.open
                 elif bar.low <= pos.sl:
                     sl_hit, sl_price = True, pos.sl - self.slippage
@@ -496,7 +538,7 @@ class SimBroker(Broker):
             lo_ask = bar.low + self.spread
             op_ask = bar.open + self.spread
             if pos.sl > 0:
-                if op_ask >= pos.sl:
+                if sl_at_open and op_ask >= pos.sl:
                     sl_hit, sl_price = True, op_ask
                 elif hi_ask >= pos.sl:
                     sl_hit, sl_price = True, pos.sl + self.slippage
@@ -513,8 +555,13 @@ class SimBroker(Broker):
                 sl_hit = False
 
         if sl_hit:
-            self._settle(pos, self.normalize_price(sl_price, key),
-                         bar.time, "STOP LOSS hit")
+            # A stop that was moved to the entry is not a losing stop, and a
+            # report that calls it one is misleading. Naming it separately also
+            # makes the exit-reason breakdown answer "how often did break-even
+            # actually save / cost me?" without any extra plumbing.
+            self._settle(pos, self.normalize_price(sl_price, key), bar.time,
+                         "BREAK EVEN stop hit" if pos.breakeven_at
+                         else "STOP LOSS hit")
         elif tp_hit:
             self._settle(pos, self.normalize_price(tp_price, key),
                          bar.time, "TAKE PROFIT hit")
@@ -532,7 +579,14 @@ class SimBroker(Broker):
         commission = pos.entry_commission + self.commission * pos.lots
         net = gross - commission
         self.balance += net
-        risk = abs(pos.entry_price - pos.sl) if pos.sl > 0 else 0.0
+        # R is measured against the risk the trade was OPENED with, not
+        # against wherever the stop happens to sit at the exit. Break-even puts
+        # the stop ON the entry, so `abs(entry - sl)` would be zero and every
+        # winner that passed through break-even would report 0R. The fallback
+        # keeps any position opened without a recorded risk behaving exactly as
+        # it always did.
+        risk = pos.initial_risk if pos.initial_risk > 0 else (
+            abs(pos.entry_price - pos.sl) if pos.sl > 0 else 0.0)
         r_mult = ((exit_price - pos.entry_price) * direction / risk) if risk > 0 else 0.0
         trade = ClosedTrade(
             ticket=pos.ticket,
@@ -555,6 +609,8 @@ class SimBroker(Broker):
             range_mid=pos.range_mid,
             trade_no_in_session=pos.trade_no_in_session,
             r_multiple=r_mult,
+            initial_risk=risk,
+            breakeven=bool(pos.breakeven_at),
             instrument=key,
         )
         self.trades.append(trade)
